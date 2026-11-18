@@ -1,17 +1,18 @@
 pluginManagement {
-    def flutterSdkPath = new File("")
-    // На GitHub Actions Action сам подключает Flutter, нам не нужно делать includeBuild
-    // Это предотвращает ошибку "Included build ... does not exist"
-    
     repositories {
         google()
         mavenCentral()
-        gradlePluginPortal()
+        gradlePluginPortal() // <-- ЭТОЙ СТРОКИ НЕ ХВАТАЛО
     }
 }
 
-// ВНИМАНИЕ: Блок dependencyResolutionManagement ПУСТОЙ
-// Это лечит ошибку "repository 'Google' was added by build file"
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
 
 rootProject.name = "fishing_radar"
 include ':app'
