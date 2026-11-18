@@ -28,6 +28,28 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Ensure Android project and permissions
+        shell: bash
+        run: |
+          if [ ! -d "android" ]; then
+            flutter create --platforms=android --org ru.fishingradar --project-name fishing_radar /tmp/scaffold
+            cp -r /tmp/scaffold/android ./android
+          fi
+          python3 - <<'EOF'
+          from pathlib import Path
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          text = p.read_text(encoding="utf-8")
+          perms = [
+              '<uses-permission android:name="android.permission.INTERNET" />',
+              '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
+              '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
+          ]
+          missing = [perm for perm in perms if perm.split('"')[1] not in text]
+          if missing:
+              text = text.replace("<application", "\n    ".join(missing) + "\n    <application", 1)
+              p.write_text(text, encoding="utf-8")
+          EOF
+
       - name: Install dependencies
         run: flutter pub get
 
