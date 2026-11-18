@@ -1,18 +1,14 @@
 pluginManagement {
-    def flutterSdkPath = {
-        // Ищем Flutter SDK в корне (где его ставит GitHub Action)
-        def flutterRoot = file('../..')
-        if (flutterRoot.exists()) {
-            return flutterRoot
-        }
-        // Если не нашли (на случай локальной сборки), ищем в родительской папке
-        flutterRoot = file('../../flutter')
-        if (flutterRoot.exists()) {
-            return flutterRoot
-        }
-        throw new GradleException("Flutter SDK not found. Checked ../.. and ../../flutter")
-    }.call()
-
+    // На GitHub Actions Flutter лежит здесь. Это стандартный путь.
+    def flutterSdkPath = file('/opt/hostedtoolcache/flutter/stable')
+    
+    // Проверка на случай локальной сборки (на случай если файла нет)
+    if (!flutterSdkPath.isDirectory()) {
+        flutterSdkPath = file('../flutter') 
+    }
+    
+    assert flutterSdkPath.isDirectory() : "Flutter SDK not found at path: $flutterSdkPath. Check if you are on GitHub Actions or if local.properties is correct."
+    
     includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
 
     repositories {
