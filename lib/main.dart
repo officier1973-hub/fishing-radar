@@ -1,20 +1,24 @@
 import 'package:flutter/material.dart';
+import 'pages/map_page.dart';
 
 void main() {
-  runApp(const MyApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const FishingRadarApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class FishingRadarApp extends StatelessWidget {
+  const FishingRadarApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Fishing Radar',
-      theme: ThemeData(primarySwatch: Colors.blue),
-      home: const Scaffold(
-        body: Center(child: Text('Flutter Cloud Build Ready')),
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF006D77)),
+        useMaterial3: true,
       ),
+      home: const MapPage(),
     );
   }
 }
