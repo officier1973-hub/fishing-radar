@@ -18,7 +18,7 @@ class ApiService {
     try {
       await Supabase.initialize(
         url: supabaseUrl,
-        anonKey: supabaseKey,
+        publishableKey: supabaseKey,
       );
       _initialized = true;
     } catch (_) {
