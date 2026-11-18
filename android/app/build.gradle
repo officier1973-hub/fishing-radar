@@ -4,9 +4,6 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
-// Внимание: здесь НЕТ блока 'allprojects' или 'repositories'!
-// Это самая частая причина ошибки "repository 'Google' was added by build file"
-
 android {
     namespace "com.example.fishingradar"
     compileSdkVersion 34
