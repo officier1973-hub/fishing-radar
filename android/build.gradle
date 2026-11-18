@@ -4,8 +4,5 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin" version "1.0.0" apply false
 }
 
-// ВНИМАНИЕ: Блок dependencyResolutionManagement УДАЛЕН ПОЛНОСТЬЮ
-// чтобы не было конфликта "repository was added by build file"
-
 rootProject.name = "fishing_radar"
 include ':app'
