@@ -358,7 +358,7 @@ class _MapPageState extends State<MapPage> {
                           : 'Долгое нажатие на карту — добавить точку',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
-                    iif (!_apiService.isBackendConfigured)
+                    if (!_apiService.isBackendConfigured)
                       Text(
                         'Режим офлайн-кеша (ключи Supabase не заданы)',
                         style: Theme.of(context)
