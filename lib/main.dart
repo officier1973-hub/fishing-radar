@@ -11,9 +11,16 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Fishing Radar',
-      theme: ThemeData(primarySwatch: Colors.blue),
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+      ),
       home: const Scaffold(
-        body: Center(child: Text('Hello from Cloud!')),
+        body: Center(
+          child: Text(
+            'Cloud Build Success!',
+            style: TextStyle(fontSize: 24),
+          ),
+        ),
       ),
     );
   }
