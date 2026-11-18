@@ -1,15 +1,9 @@
 pluginManagement {
     def flutterSdkPath = new File("")
-    // На GitHub Actions Flutter Action устанавливает SDK в /opt/hostedtoolcache
-    // Но так как мы используем includeBuild, Gradle сам найдет его через local.properties
-    // или мы укажем путь относительно проекта.
-    
-    // Самый надежный способ для GitHub Actions:
     def envFlutterRoot = System.getenv("FLUTTER_ROOT")
     if (envFlutterRoot != null) {
         flutterSdkPath = new File(envFlutterRoot)
     } else {
-        // Fallback для локальной сборки
         flutterSdkPath = new File("../flutter")
     }
 
@@ -23,5 +17,14 @@ pluginManagement {
     }
 }
 
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+// ЭТИ СТРОКИ ПЕРЕЕХАЛИ СЮДА:
 rootProject.name = "fishing_radar"
 include ':app'
