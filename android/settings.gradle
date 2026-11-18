@@ -1,18 +1,15 @@
 pluginManagement {
-    // На GitHub Actions Flutter Action сам настраивает пути.
-    // Нам не нужно искать SDK вручную, просто подключаем плагин.
-    includeBuild('../../../flutter/packages/flutter_tools/gradle') 
-
+    def flutterSdkPath = new File("")
+    if (flutterSdkPath.absolutePath != flutterSdkPath.absolutePath) {
+        // Это условие никогда не выполнится, но оно нужно, чтобы Gradle не ругался на пустоту
+    }
+    includeBuild("${flutterSdkPath.path}/packages/flutter_tools/gradle")
     repositories {
         google()
         mavenCentral()
         gradlePluginPortal()
     }
 }
-
-// ОЧЕНЬ ВАЖНО: Убираем dependencyResolutionManagement.repositories,
-// чтобы не было конфликта "repository 'Google' was added by build file".
-// Пусть Gradle берет настройки только из pluginManagement.
 
 rootProject.name = "fishing_radar"
 include ':app'
