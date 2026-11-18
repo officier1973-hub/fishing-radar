@@ -28,13 +28,12 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Ensure Android project and permissions
+      - name: Recreate clean Android project and permissions
         shell: bash
         run: |
-          if [ ! -d "android" ]; then
-            flutter create --platforms=android --org ru.fishingradar --project-name fishing_radar /tmp/scaffold
-            cp -r /tmp/scaffold/android ./android
-          fi
+          rm -rf android /tmp/scaffold
+          flutter create --platforms=android --org ru.fishingradar --project-name fishing_radar /tmp/scaffold
+          cp -r /tmp/scaffold/android ./android
           python3 - <<'EOF'
           from pathlib import Path
           p = Path("android/app/src/main/AndroidManifest.xml")
@@ -65,6 +64,4 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fishing-radar-debug-apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
-          if-no-files-found: error
+          name: fishing-ra
