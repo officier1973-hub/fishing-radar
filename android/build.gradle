@@ -1,6 +1,7 @@
 buildscript {
     ext.kotlin_version = '1.7.10'
     repositories {
+        google()  // <-- ВАЖНО: Google должен быть здесь для поиска плагина Gradle
         mavenCentral()
     }
 
@@ -12,8 +13,7 @@ buildscript {
 
 allprojects {
     repositories {
-        google()
-        mavenCentral()
+        mavenCentral() // <-- Google здесь быть не должно, чтобы не было дублей
     }
 }
 
