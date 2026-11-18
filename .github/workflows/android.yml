@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build FishRadar Release APK
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    name: Build Debug APK
+    name: Build FishRadar Release APK
     runs-on: ubuntu-24.04
 
     steps:
@@ -35,9 +35,12 @@ jobs:
           flutter create --platforms=android --org ru.fishingradar --project-name fishing_radar /tmp/scaffold
           cp -r /tmp/scaffold/android ./android
           python3 - <<'EOF'
+          import re
           from pathlib import Path
+
           p = Path("android/app/src/main/AndroidManifest.xml")
           text = p.read_text(encoding="utf-8")
+          text = re.sub(r'android:label="[^"]*"', 'android:label="FishRadar"', text, count=1)
           perms = [
               '<uses-permission android:name="android.permission.INTERNET" />',
               '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
@@ -46,7 +49,7 @@ jobs:
           missing = [perm for perm in perms if perm.split('"')[1] not in text]
           if missing:
               text = text.replace("<application", "\n    ".join(missing) + "\n    <application", 1)
-              p.write_text(text, encoding="utf-8")
+          p.write_text(text, encoding="utf-8")
           EOF
 
       - name: Install dependencies
@@ -55,15 +58,14 @@ jobs:
       - name: Analyze code
         run: flutter analyze --no-fatal-infos
 
-      - name: Build Debug APK
-        run: >
-          flutter build apk --debug
-          --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }}
-          --dart-define=SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}
+      - name: Build Release APK
+        run: |
+          flutter build apk --release --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }} --dart-define=SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}
+          cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/FishRadar.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v7
         with:
-          name: fishing-radar-debug-apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          name: FishRadar
+          path: build/app/outputs/flutter-apk/FishRadar.apk
           if-no-files-found: error
