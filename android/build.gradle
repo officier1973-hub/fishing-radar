@@ -1,8 +1,8 @@
 buildscript {
     ext.kotlin_version = '1.7.10'
     repositories {
-        google()  // <-- ВАЖНО: Google должен быть здесь для поиска плагина Gradle
-        mavenCentral()
+        google()
+        mavenCentral() 
     }
 
     dependencies {
@@ -11,11 +11,8 @@ buildscript {
     }
 }
 
-allprojects {
-    repositories {
-        mavenCentral() // <-- Google здесь быть не должно, чтобы не было дублей
-    }
-}
+// ВНИМАНИЕ: Блок allprojects { repositories { ... } } ПОЛНОСТЬЮ УДАЛЕН
+// Теперь репозитории управляются ТОЛЬКО в settings.gradle
 
 rootProject.buildDir = '../build'
 subprojects {
