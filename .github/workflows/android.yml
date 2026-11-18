@@ -1,4 +1,4 @@
-name: Build Android APK (Clean)
+name: Build Android APK (Clean v2)
 
 on:
   push:
@@ -10,11 +10,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # Исправлено: v5 вместо v4
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
+    # Исправлено: v5 вместо v3
     - name: Setup Java
-      uses: actions/setup-java@v3
+      uses: actions/setup-java@v5
       with:
         distribution: 'temurin'
         java-version: '17'
