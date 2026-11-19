@@ -24,6 +24,8 @@ Future<void> showLayersSheet({
   required MapLayerSettings current,
   required ValueChanged<MapLayerSettings> onChanged,
 }) {
+  const popularFish = ['', 'Судак', 'Щука', 'Окунь', 'Лещ', 'Карп'];
+
   return showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
@@ -38,28 +40,28 @@ Future<void> showLayersSheet({
           }
 
           return SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Слои карты и радар',
+                    'Слои карты и фильтры',
                     style: Theme.of(ctx).textTheme.titleLarge,
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'Базовая карта',
+                    'Подложка карты',
                     style: Theme.of(ctx).textTheme.labelLarge,
                   ),
                   const SizedBox(height: 8),
                   SegmentedButton<BaseMapType>(
                     segments: const [
                       ButtonSegment(
-                        value: BaseMapType.osm,
+                        value: BaseMapType.standard,
                         icon: Icon(Icons.map),
-                        label: Text('Схема OSM'),
+                        label: Text('Карта'),
                       ),
                       ButtonSegment(
                         value: BaseMapType.satellite,
@@ -74,17 +76,31 @@ Future<void> showLayersSheet({
                   const SizedBox(height: 8),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('Навигация OpenSeaMap'),
-                    subtitle: const Text('Бакены, створы, судовой ход'),
+                    title: const Text('Водные знаки и фарватер'),
+                    subtitle: const Text('Бакены, створы и судовой ход'),
                     value: local.showSeamarks,
                     onChanged: (v) => update(local.copyWith(showSeamarks: v)),
                   ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('Зоны глубин (по отчётам)'),
-                    subtitle: const Text('Цветовые ореолы глубин на водоёме'),
+                    title: const Text('Зоны глубин (по точкам)'),
+                    subtitle: const Text('Цветные ореолы глубин на водоёме'),
                     value: local.showDepthZones,
                     onChanged: (v) => update(local.copyWith(showDepthZones: v)),
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Тепловая карта клёва'),
+                    subtitle: const Text('Подсвечивает горячие зоны уловов'),
+                    value: local.showHeatmap,
+                    onChanged: (v) => update(local.copyWith(showHeatmap: v)),
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Только мои точки'),
+                    subtitle: const Text('Скрыть чужие отчёты на карте'),
+                    value: local.onlyMySpots,
+                    onChanged: (v) => update(local.copyWith(onlyMySpots: v)),
                   ),
                   const Divider(),
                   Text(
@@ -106,7 +122,7 @@ Future<void> showLayersSheet({
                   ),
                   const SizedBox(height: 14),
                   Text(
-                    'Фильтр точек по глубине',
+                    'Фильтр по глубине',
                     style: Theme.of(ctx).textTheme.labelLarge,
                   ),
                   const SizedBox(height: 8),
@@ -119,6 +135,26 @@ Future<void> showLayersSheet({
                         selected: local.depthFilter == filter,
                         onSelected: (_) =>
                             update(local.copyWith(depthFilter: filter)),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    'Фильтр по рыбе',
+                    style: Theme.of(ctx).textTheme.labelLarge,
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: popularFish.map((fish) {
+                      final label = fish.isEmpty ? 'Вся рыба' : fish;
+                      return ChoiceChip(
+                        label: Text(label),
+                        selected: local.fishFilter.toLowerCase() ==
+                            fish.toLowerCase(),
+                        onSelected: (_) =>
+                            update(local.copyWith(fishFilter: fish)),
                       );
                     }).toList(),
                   ),
@@ -149,12 +185,22 @@ Future<void> showOfflineCacheSheet({
       var isCancelled = false;
       var done = 0;
       var total = 0;
+      var saved = 0;
       String? statusMessage;
 
       return StatefulBuilder(
         builder: (ctx, setSheetState) {
           final maxZoom = detailedZoom ? 15 : 14;
           const minZoom = 12;
+
+          final estimated = offlineService.estimateTileCount(
+            bounds: visibleBounds,
+            minZoom: minZoom,
+            maxZoom: maxZoom,
+          );
+          final capped = estimated > OfflineMapService.maxTilesPerDownload;
+          final plannedCount =
+              capped ? OfflineMapService.maxTilesPerDownload : estimated;
 
           return SafeArea(
             child: Padding(
@@ -176,39 +222,25 @@ Future<void> showOfflineCacheSheet({
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Высокая детализация (зум 12–15)'),
-                    subtitle: const Text('Выше точность берега, но больше тайлов'),
+                    subtitle: const Text('Выше точность берега, но больше фрагментов'),
                     value: detailedZoom,
                     onChanged: isDownloading
                         ? null
                         : (v) => setSheetState(() => detailedZoom = v),
                   ),
-                  FutureBuilder<int>(
-                    future: offlineService.estimateTileCount(
-                      bounds: visibleBounds,
-                      minZoom: minZoom,
-                      maxZoom: maxZoom,
-                    ),
-                    builder: (context, snapshot) {
-                      final est = snapshot.data ?? 0;
-                      final capped = est > OfflineMapService.maxTilesPerDownload;
-                      final count = capped
-                          ? OfflineMapService.maxTilesPerDownload
-                          : est;
-                      return Text(
-                        capped
-                            ? 'Тайлов к загрузке: $count (лимит за 1 раз, приблизьте карту для деталей)'
-                            : 'Тайлов к загрузке: $count (≈ ${(count * 0.025).toStringAsFixed(1)} МБ)',
-                        style: Theme.of(ctx).textTheme.bodyMedium,
-                      );
-                    },
+                  Text(
+                    capped
+                        ? 'К загрузке: $plannedCount фрагментов (лимит за 1 раз — приблизьте карту для деталей)'
+                        : 'К загрузке: $plannedCount фрагментов (≈ ${(plannedCount * 0.025).toStringAsFixed(1)} МБ)',
+                    style: Theme.of(ctx).textTheme.bodyMedium,
                   ),
                   if (isDownloading) ...[
                     const SizedBox(height: 12),
                     LinearProgressIndicator(
-                      value: total > 0 ? done / total : null,
+                      value: total > 0 ? (done / total).clamp(0.0, 1.0) : 0.0,
                     ),
                     const SizedBox(height: 6),
-                    Text('Загружено: $done из $total'),
+                    Text('Загружено: $done из $total (сохранено: $saved)'),
                   ],
                   if (statusMessage != null) ...[
                     const SizedBox(height: 10),
@@ -235,35 +267,55 @@ Future<void> showOfflineCacheSheet({
                               isDownloading = true;
                               isCancelled = false;
                               done = 0;
-                              total = 0;
+                              total = plannedCount;
+                              saved = 0;
                               statusMessage = null;
                             });
-                            final url = baseMap == BaseMapType.satellite
-                                ? OfflineMapService.satelliteUrlTemplate
-                                : OfflineMapService.osmUrlTemplate;
 
-                            final loaded = await offlineService.downloadRegion(
-                              urlTemplate: url,
-                              bounds: visibleBounds,
-                              minZoom: minZoom,
-                              maxZoom: maxZoom,
-                              isCancelled: () => isCancelled,
-                              onProgress: (d, t) {
-                                if (!ctx.mounted) return;
-                                setSheetState(() {
-                                  done = d;
-                                  total = t;
-                                });
-                              },
-                            );
+                            try {
+                              final url = baseMap == BaseMapType.satellite
+                                  ? OfflineMapService.satelliteUrlTemplate
+                                  : OfflineMapService.standardUrlTemplate;
 
-                            if (!ctx.mounted) return;
-                            setSheetState(() {
-                              isDownloading = false;
-                              statusMessage = isCancelled
-                                  ? 'Загрузка остановлена ($loaded тайлов в кеше).'
-                                  : 'Готово! В офлайн-кеше сохранено $loaded тайлов.';
-                            });
+                              final result = await offlineService.downloadRegion(
+                                urlTemplate: url,
+                                bounds: visibleBounds,
+                                minZoom: minZoom,
+                                maxZoom: maxZoom,
+                                isCancelled: () => isCancelled,
+                                onProgress: (d, t, s) {
+                                  if (!ctx.mounted) return;
+                                  setSheetState(() {
+                                    done = d;
+                                    total = t;
+                                    saved = s;
+                                  });
+                                },
+                              );
+
+                              if (!ctx.mounted) return;
+                              setSheetState(() {
+                                if (isCancelled) {
+                                  statusMessage =
+                                      'Остановлено: сохранено ${result.saved} из ${result.total}.';
+                                } else if (result.saved == 0 && result.total > 0) {
+                                  statusMessage =
+                                      'Не удалось скачать карту — проверьте интернет.';
+                                } else {
+                                  statusMessage =
+                                      'Готово! Сохранено ${result.saved} из ${result.total} фрагментов.';
+                                }
+                              });
+                            } catch (e) {
+                              if (!ctx.mounted) return;
+                              setSheetState(() {
+                                statusMessage = 'Ошибка загрузки: $e';
+                              });
+                            } finally {
+                              if (ctx.mounted) {
+                                setSheetState(() => isDownloading = false);
+                              }
+                            }
                           },
                         ),
                       ),
