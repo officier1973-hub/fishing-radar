@@ -42,6 +42,8 @@ drop policy if exists "spots_delete_own" on public.fishing_spots;
 create policy "spots_delete_own" on public.fishing_spots
   for delete using (auth.uid() = user_id);
 
+drop function if exists public.get_spots_nearby(double precision, double precision, double precision);
+
 create or replace function public.get_spots_nearby(
   user_lat double precision,
   user_lon double precision,
