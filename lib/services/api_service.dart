@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/fishing_spot.dart';
@@ -8,21 +9,26 @@ class ApiService {
   static const String supabaseKey = String.fromEnvironment('SUPABASE_KEY');
   static const String _cacheKey = 'cached_fishing_spots_v1';
 
+  static final ValueNotifier<bool> backendReadyNotifier =
+      ValueNotifier<bool>(false);
+
   static bool _initialized = false;
 
   bool get isBackendConfigured =>
       supabaseUrl.isNotEmpty && supabaseKey.isNotEmpty && _initialized;
 
   static Future<void> initSupabase() async {
-    if (supabaseUrl.isEmpty || supabaseKey.isEmpty) return;
+    if (supabaseUrl.isEmpty || supabaseKey.isEmpty || _initialized) return;
     try {
       await Supabase.initialize(
         url: supabaseUrl,
         publishableKey: supabaseKey,
-      );
+      ).timeout(const Duration(seconds: 4));
       _initialized = true;
+      backendReadyNotifier.value = true;
     } catch (_) {
       _initialized = false;
+      backendReadyNotifier.value = false;
     }
   }
 
