@@ -28,6 +28,81 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Configure Gradle Google mirror for Maven Central
+        shell: bash
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat <<'EOF' > ~/.gradle/init.d/maven-central-mirror.gradle
+          def central = ~/^https:\/\/(repo\.maven\.apache\.org|repo1\.maven\.org)\/maven2\/?/
+          def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+          def fallbackName = 'mavenCentralBehindMirror'
+          def mirrorName = 'googleMavenCentralMirror'
+
+          def addFallback = { RepositoryHandler repositories ->
+              if (repositories.findByName(fallbackName) == null) {
+                  repositories.maven {
+                      name = fallbackName
+                      url = 'https://repo.maven.apache.org/maven2/'
+                  }
+              }
+          }
+
+          def toMirror = { RepositoryHandler repositories ->
+              def hasFallback = false
+              repositories.all { repository ->
+                  if (repository.name == fallbackName || repository.name == mirrorName) {
+                      return
+                  }
+                  if (repository instanceof MavenArtifactRepository) {
+                      def url = repository.url.toString()
+                      if (url =~ central) {
+                          repository.url = url.replaceFirst(central, mirror)
+                          if (!hasFallback) {
+                              hasFallback = true
+                              addFallback(repositories)
+                              return
+                          }
+                      }
+                  }
+                  def last = repositories.findByName(fallbackName)
+                  if (hasFallback && last != null && !repositories.last().is(last)) {
+                      repositories.remove(last)
+                      repositories.add(last)
+                  }
+              }
+          }
+
+          beforeSettings { settings ->
+              toMirror(settings.buildscript.repositories)
+              toMirror(settings.pluginManagement.repositories)
+              toMirror(settings.dependencyResolutionManagement.repositories)
+          }
+
+          settingsEvaluated { settings ->
+              def repos = settings.pluginManagement.repositories
+              if (repos.isEmpty()) {
+                  repos.maven {
+                      name = mirrorName
+                      url = mirror
+                  }
+                  addFallback(repos)
+                  repos.gradlePluginPortal()
+              } else if (repos.findByName(mirrorName) == null) {
+                  def m = repos.maven {
+                      name = mirrorName
+                      url = mirror
+                  }
+                  repos.remove(m)
+                  repos.addFirst(m)
+              }
+          }
+
+          allprojects { project ->
+              toMirror(project.buildscript.repositories)
+              toMirror(project.repositories)
+          }
+          EOF
+
       - name: Install SVG converter for launcher icon
         run: |
           sudo apt-get update
@@ -71,14 +146,12 @@ jobs:
               bg_match = re.search(r'<rect[^>]*id="bg"[^>]*fill="([^"]+)"', svg_raw)
               bg_color = bg_match.group(1) if bg_match else "#041E2B"
 
-              # Версия без фона для adaptive foreground и логотипа на splash screen
               fg_svg_path = Path("/tmp/fg_icon.svg")
               fg_svg_raw = re.sub(r'<rect[^>]*id="bg"[^>]*/>', "", svg_raw)
               fg_svg_path.write_text(fg_svg_raw, encoding="utf-8")
 
               res_dir = Path("android/app/src/main/res")
 
-              # Классические mipmap-иконки
               sizes = {
                   "mipmap-mdpi": 48,
                   "mipmap-hdpi": 72,
@@ -94,7 +167,6 @@ jobs:
                       check=True,
                   )
 
-              # Adaptive icon foreground + splash logo
               draw_xxxhdpi = res_dir / "drawable-xxxhdpi"
               draw_xxxhdpi.mkdir(parents=True, exist_ok=True)
               subprocess.run(
