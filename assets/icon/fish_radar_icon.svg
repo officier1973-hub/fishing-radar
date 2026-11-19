@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect id="bg" width="512" height="512" fill="#041E2B"/>
+
+  <!-- Кольца радара (внутри безопасной зоны для адаптивной иконки) -->
+  <circle cx="256" cy="256" r="154" fill="none" stroke="#00E5FF" stroke-opacity="0.35" stroke-width="6"/>
+  <circle cx="256" cy="256" r="108" fill="none" stroke="#00E5FF" stroke-opacity="0.50" stroke-width="5"/>
+  <circle cx="256" cy="256" r="60"  fill="none" stroke="#00E5FF" stroke-opacity="0.35" stroke-width="4"/>
+
+  <!-- Перекрестие осей -->
+  <line x1="256" y1="96" x2="256" y2="416" stroke="#00E5FF" stroke-opacity="0.22" stroke-width="3"/>
+  <line x1="96" y1="256" x2="416" y2="256" stroke="#00E5FF" stroke-opacity="0.22" stroke-width="3"/>
+
+  <!-- Луч сканирования радара -->
+  <path d="M 256 256 L 256 102 A 154 154 0 0 1 398 197 Z" fill="#00E5FF" fill-opacity="0.22"/>
+  <line x1="256" y1="256" x2="398" y2="197" stroke="#00E5FF" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Силуэт рыбы (судак / хищник) -->
+  <path d="M 350 256
+           C 328 224, 296 212, 268 212
+           L 244 186
+           L 232 216
+           C 214 222, 200 232, 190 241
+           L 158 212
+           L 172 256
+           L 158 300
+           L 190 271
+           C 214 288, 246 300, 280 298
+           C 310 295, 334 278, 350 256 Z"
+        fill="#FFB703"/>
+
+  <!-- Детали рыбы: глаз и жаберная дуга -->
+  <circle cx="320" cy="245" r="6" fill="#041E2B"/>
+  <path d="M 298 236 Q 287 256 298 276" fill="none" stroke="#041E2B" stroke-width="4.5" stroke-linecap="round"/>
+
+  <!-- Точка цели на кольце -->
+  <circle cx="348" cy="164" r="10" fill="#00E5FF"/>
+  <circle cx="348" cy="164" r="17" fill="none" stroke="#00E5FF" stroke-opacity="0.45" stroke-width="3"/>
+</svg>
