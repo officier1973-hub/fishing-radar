@@ -137,6 +137,7 @@ Future<void> showOfflineCacheSheet({
   required OfflineMapService offlineService,
   required LatLngBounds visibleBounds,
   required BaseMapType baseMap,
+  VoidCallback? onCacheCleared,
 }) {
   return showModalBottomSheet<void>(
     context: context,
@@ -153,7 +154,7 @@ Future<void> showOfflineCacheSheet({
       return StatefulBuilder(
         builder: (ctx, setSheetState) {
           final maxZoom = detailedZoom ? 15 : 14;
-          final minZoom = 12;
+          const minZoom = 12;
 
           return SafeArea(
             child: Padding(
@@ -274,6 +275,7 @@ Future<void> showOfflineCacheSheet({
                             ? null
                             : () async {
                                 await offlineService.clearCache();
+                                onCacheCleared?.call();
                                 if (!ctx.mounted) return;
                                 setSheetState(() {
                                   statusMessage = 'Кеш карт очищен.';
