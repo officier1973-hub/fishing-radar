@@ -1,21 +1,46 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../models/chat_message.dart';
 import '../models/fishing_spot.dart';
 
 class ApiService {
   static const String supabaseUrl = String.fromEnvironment('SUPABASE_URL');
   static const String supabaseKey = String.fromEnvironment('SUPABASE_KEY');
-  static const String _cacheKey = 'cached_fishing_spots_v1';
+  static const String _cacheKey = 'cached_fishing_spots_v2';
+  static const String _localChatKey = 'cached_region_chat_v1';
 
   static final ValueNotifier<bool> backendReadyNotifier =
       ValueNotifier<bool>(false);
+  static final ValueNotifier<int> pendingCountNotifier =
+      ValueNotifier<int>(0);
+  static final ValueNotifier<String?> lastErrorNotifier =
+      ValueNotifier<String?>(null);
 
   static bool _initialized = false;
 
   bool get isBackendConfigured =>
       supabaseUrl.isNotEmpty && supabaseKey.isNotEmpty && _initialized;
+
+  User? get currentUser =>
+      isBackendConfigured ? Supabase.instance.client.auth.currentUser : null;
+
+  String? get currentUserId => currentUser?.id;
+
+  String get currentAuthorName {
+    final user = currentUser;
+    if (user == null) return 'Рыбак';
+    final metaName = user.userMetadata?['display_name']?.toString();
+    if (metaName != null && metaName.trim().isNotEmpty) return metaName.trim();
+    if (user.email != null && user.email!.contains('@')) {
+      return user.email!.split('@').first;
+    }
+    return user.isAnonymous ? 'Гость' : 'Рыбак';
+  }
 
   static Future<void> initSupabase() async {
     if (supabaseUrl.isEmpty || supabaseKey.isEmpty || _initialized) return;
@@ -26,10 +51,82 @@ class ApiService {
       ).timeout(const Duration(seconds: 4));
       _initialized = true;
       backendReadyNotifier.value = true;
-    } catch (_) {
+    } catch (e) {
       _initialized = false;
       backendReadyNotifier.value = false;
+      lastErrorNotifier.value = 'Ошибка подключения: $e';
     }
+  }
+
+  Future<String?> signInWithEmail(String email, String password) async {
+    if (!isBackendConfigured) return 'Сервер не подключён';
+    try {
+      await Supabase.instance.client.auth.signInWithPassword(
+        email: email.trim(),
+        password: password,
+      );
+      return null;
+    } on AuthException catch (e) {
+      return e.message;
+    } catch (e) {
+      return 'Не удалось войти: $e';
+    }
+  }
+
+  Future<String?> signUpWithEmail({
+    required String email,
+    required String password,
+    required String displayName,
+  }) async {
+    if (!isBackendConfigured) return 'Сервер не подключён';
+    try {
+      await Supabase.instance.client.auth.signUp(
+        email: email.trim(),
+        password: password,
+        data: {'display_name': displayName.trim()},
+      );
+      return null;
+    } on AuthException catch (e) {
+      return e.message;
+    } catch (e) {
+      return 'Не удалось зарегистрироваться: $e';
+    }
+  }
+
+  Future<String?> signInAsGuest() async {
+    if (!isBackendConfigured) return 'Сервер не подключён';
+    try {
+      await Supabase.instance.client.auth.signInAnonymously();
+      return null;
+    } on AuthException catch (e) {
+      return e.message;
+    } catch (e) {
+      return 'Гостевой вход недоступен: $e';
+    }
+  }
+
+  Future<void> signOut() async {
+    if (!isBackendConfigured) return;
+    await Supabase.instance.client.auth.signOut();
+  }
+
+  Future<String?> uploadPhotoBytes(Uint8List bytes, String ext) async {
+    if (!isBackendConfigured) return null;
+    final cleanExt = ext.isEmpty ? 'jpg' : ext;
+    final owner = currentUserId ?? 'anon';
+    final path =
+        '$owner/${DateTime.now().millisecondsSinceEpoch}.$cleanExt';
+    await Supabase.instance.client.storage.from('spot-photos').uploadBinary(
+          path,
+          bytes,
+          fileOptions: FileOptions(
+            contentType: 'image/$cleanExt',
+            upsert: true,
+          ),
+        );
+    return Supabase.instance.client.storage
+        .from('spot-photos')
+        .getPublicUrl(path);
   }
 
   Future<List<FishingSpot>> getSpots({
@@ -37,6 +134,11 @@ class ApiService {
     required double lon,
     double radiusKm = 50,
   }) async {
+    await syncPendingSpots();
+
+    final cached = await _loadFromCache();
+    final pendingLocal = cached.where((s) => !s.isSynced).toList();
+
     if (isBackendConfigured) {
       try {
         final response = await Supabase.instance.client.rpc(
@@ -49,60 +151,353 @@ class ApiService {
         );
 
         final List<dynamic> list = response as List<dynamic>;
-        final spots = list
-            .map((e) => FishingSpot.fromJson(Map<String, dynamic>.from(e as Map)))
+        final remoteSpots = list
+            .map(
+              (e) => FishingSpot.fromJson(Map<String, dynamic>.from(e as Map))
+                  .copyWith(isSynced: true),
+            )
             .toList();
 
-        await _saveToCache(spots);
-        return spots;
-      } catch (_) {
-        // Нет интернета на реке — берем из локального кеша
+        lastErrorNotifier.value = null;
+        final merged = [...pendingLocal, ...remoteSpots];
+        await _saveToCache(merged);
+        _updatePendingCounter(merged);
+        return merged;
+      } catch (e) {
+        lastErrorNotifier.value = 'Офлайн-режим (нет связи с облаком)';
       }
     }
 
-    final cached = await _loadFromCache();
-    if (cached.isNotEmpty) return cached;
+    _updatePendingCounter(cached);
+    final realCached =
+        cached.where((s) => !s.id.startsWith('demo-')).toList();
+    if (realCached.isNotEmpty) {
+      return cached;
+    }
 
     final demo = _demoSpots(lat, lon);
     await _saveToCache(demo);
     return demo;
   }
 
-  Future<FishingSpot> createSpot(FishingSpot spot) async {
-    FishingSpot savedSpot = spot;
+  Future<FishingSpot> createSpot(
+    FishingSpot spot, {
+    Uint8List? photoBytes,
+    String photoExt = 'jpg',
+  }) async {
+    var prepared = spot;
+
+    if (prepared.isPrivateCircle &&
+        (prepared.publicLatitude == null || prepared.publicLongitude == null)) {
+      final shifted = _offsetCoordinate(
+        prepared.latitude,
+        prepared.longitude,
+        minMeters: 120,
+        maxMeters: 210,
+      );
+      prepared = prepared.copyWith(
+        publicLatitude: shifted.$1,
+        publicLongitude: shifted.$2,
+      );
+    }
+
+    if (prepared.userId == null && currentUserId != null) {
+      prepared = prepared.copyWith(
+        userId: currentUserId,
+        authorName: currentAuthorName,
+      );
+    }
 
     if (isBackendConfigured) {
       try {
-        final payload = {
-          'latitude': spot.latitude,
-          'longitude': spot.longitude,
-          'depth_meters': spot.depthMeters,
-          'bottom_type': spot.bottomType,
-          'fish_species': spot.fishSpecies,
-          'fish_weight_kg': spot.fishWeightKg,
-          'comment': spot.comment,
-          'is_private_circle': spot.isPrivateCircle,
-        };
+        String? uploadedUrl = prepared.photoUrl;
+        if (photoBytes != null) {
+          uploadedUrl = await uploadPhotoBytes(photoBytes, photoExt);
+        } else if (prepared.localPhotoPath != null) {
+          final file = File(prepared.localPhotoPath!);
+          if (file.existsSync()) {
+            uploadedUrl = await uploadPhotoBytes(
+              await file.readAsBytes(),
+              photoExt,
+            );
+          }
+        }
 
-        final inserted = await Supabase.instance.client
+        final inserted = await _insertIntoSupabase(
+          prepared.copyWith(photoUrl: uploadedUrl),
+        );
+        lastErrorNotifier.value = null;
+
+        final current = await _loadFromCache();
+        current.removeWhere((s) => s.id.startsWith('demo-'));
+        current.insert(0, inserted);
+        await _saveToCache(current);
+        _updatePendingCounter(current);
+        return inserted;
+      } catch (e) {
+        lastErrorNotifier.value = 'Сохранено на телефон (ждёт сети)';
+      }
+    }
+
+    final offlineSpot = prepared.copyWith(
+      id: prepared.id.startsWith('local-')
+          ? prepared.id
+          : 'local-${DateTime.now().millisecondsSinceEpoch}',
+      isSynced: false,
+    );
+
+    final current = await _loadFromCache();
+    current.removeWhere((s) => s.id.startsWith('demo-'));
+    current.insert(0, offlineSpot);
+    await _saveToCache(current);
+    _updatePendingCounter(current);
+    return offlineSpot;
+  }
+
+  Future<FishingSpot> updateSpot(
+    FishingSpot spot, {
+    Uint8List? newPhotoBytes,
+    String photoExt = 'jpg',
+  }) async {
+    var updated = spot;
+    if (updated.isPrivateCircle &&
+        (updated.publicLatitude == null || updated.publicLongitude == null)) {
+      final shifted = _offsetCoordinate(
+        updated.latitude,
+        updated.longitude,
+        minMeters: 120,
+        maxMeters: 210,
+      );
+      updated = updated.copyWith(
+        publicLatitude: shifted.$1,
+        publicLongitude: shifted.$2,
+      );
+    }
+
+    if (isBackendConfigured && updated.isSynced && !updated.id.startsWith('local-')) {
+      try {
+        if (newPhotoBytes != null) {
+          final url = await uploadPhotoBytes(newPhotoBytes, photoExt);
+          updated = updated.copyWith(photoUrl: url);
+        }
+
+        final row = await Supabase.instance.client
             .from('fishing_spots')
-            .insert(payload)
-            .select(
-              'id, latitude, longitude, depth_meters, bottom_type, '
-              'fish_species, fish_weight_kg, comment, is_private_circle, created_at',
-            )
+            .update({
+              'depth_meters': updated.depthMeters,
+              'bottom_type': updated.bottomType,
+              'fish_species': updated.fishSpecies,
+              'fish_weight_kg': updated.fishWeightKg,
+              'comment': updated.comment,
+              'is_private_circle': updated.isPrivateCircle,
+              'public_latitude': updated.publicLatitude,
+              'public_longitude': updated.publicLongitude,
+              'photo_url': updated.photoUrl,
+            })
+            .eq('id', updated.id)
+            .select()
             .single();
 
-        savedSpot = FishingSpot.fromJson(Map<String, dynamic>.from(inserted));
-      } catch (_) {
-        // В офлайне сохраняем локально
+        updated = FishingSpot.fromJson(Map<String, dynamic>.from(row))
+            .copyWith(isSynced: true);
+        lastErrorNotifier.value = null;
+      } catch (e) {
+        lastErrorNotifier.value = 'Изменено локально (ошибка сети)';
       }
     }
 
     final current = await _loadFromCache();
-    current.insert(0, savedSpot);
+    final idx = current.indexWhere((s) => s.id == updated.id);
+    if (idx != -1) {
+      current[idx] = updated;
+    } else {
+      current.insert(0, updated);
+    }
     await _saveToCache(current);
-    return savedSpot;
+    return updated;
+  }
+
+  Future<void> deleteSpot(FishingSpot spot) async {
+    if (isBackendConfigured &&
+        spot.isSynced &&
+        !spot.id.startsWith('local-') &&
+        !spot.id.startsWith('demo-')) {
+      try {
+        await Supabase.instance.client
+            .from('fishing_spots')
+            .delete()
+            .eq('id', spot.id);
+      } catch (_) {}
+    }
+
+    final current = await _loadFromCache();
+    current.removeWhere((s) => s.id == spot.id);
+    await _saveToCache(current);
+    _updatePendingCounter(current);
+  }
+
+  Future<int> syncPendingSpots() async {
+    if (!isBackendConfigured) return 0;
+
+    final current = await _loadFromCache();
+    final pending = current.where((s) => !s.isSynced).toList();
+    if (pending.isEmpty) {
+      _updatePendingCounter(current);
+      return 0;
+    }
+
+    var syncedCount = 0;
+    for (final spot in pending) {
+      try {
+        var prepared = spot;
+        if (prepared.localPhotoPath != null && prepared.photoUrl == null) {
+          final file = File(prepared.localPhotoPath!);
+          if (file.existsSync()) {
+            final url = await uploadPhotoBytes(await file.readAsBytes(), 'jpg');
+            prepared = prepared.copyWith(photoUrl: url);
+          }
+        }
+        final uploaded = await _insertIntoSupabase(prepared);
+        final idx = current.indexWhere((s) => s.id == spot.id);
+        if (idx != -1) {
+          current[idx] = uploaded;
+        }
+        syncedCount++;
+      } catch (_) {
+        // Оставляем в очереди до следующей попытки
+      }
+    }
+
+    await _saveToCache(current);
+    _updatePendingCounter(current);
+    return syncedCount;
+  }
+
+  Future<FishingSpot> _insertIntoSupabase(FishingSpot spot) async {
+    final payload = <String, dynamic>{
+      'latitude': spot.latitude,
+      'longitude': spot.longitude,
+      'public_latitude': spot.publicLatitude,
+      'public_longitude': spot.publicLongitude,
+      'depth_meters': spot.depthMeters,
+      'bottom_type': spot.bottomType,
+      'fish_species': spot.fishSpecies,
+      'fish_weight_kg': spot.fishWeightKg,
+      'comment': spot.comment,
+      'is_private_circle': spot.isPrivateCircle,
+      'photo_url': spot.photoUrl,
+      'user_id': spot.userId ?? currentUserId,
+      'author_name': spot.authorName ?? currentAuthorName,
+    };
+
+    final inserted = await Supabase.instance.client
+        .from('fishing_spots')
+        .insert(payload)
+        .select()
+        .single();
+
+    return FishingSpot.fromJson(Map<String, dynamic>.from(inserted))
+        .copyWith(isSynced: true);
+  }
+
+  Stream<List<ChatMessage>> watchRegionMessages(String region) {
+    if (!isBackendConfigured) {
+      return Stream.fromFuture(_loadLocalChat(region));
+    }
+    return Supabase.instance.client
+        .from('region_messages')
+        .stream(primaryKey: ['id'])
+        .eq('region', region)
+        .order('created_at', ascending: true)
+        .limit(100)
+        .map(
+          (rows) => rows
+              .map((e) => ChatMessage.fromJson(Map<String, dynamic>.from(e)))
+              .toList(),
+        );
+  }
+
+  Future<String?> sendRegionMessage(String region, String text) async {
+    final clean = text.trim();
+    if (clean.isEmpty) return null;
+
+    if (!isBackendConfigured) {
+      final list = await _loadLocalChat(region);
+      list.add(
+        ChatMessage(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          region: region,
+          userId: currentUserId,
+          authorName: currentAuthorName,
+          text: clean,
+          createdAt: DateTime.now(),
+        ),
+      );
+      await _saveLocalChat(region, list);
+      return null;
+    }
+
+    try {
+      await Supabase.instance.client.from('region_messages').insert({
+        'region': region,
+        'user_id': currentUserId,
+        'author_name': currentAuthorName,
+        'message_text': clean,
+      });
+      return null;
+    } catch (e) {
+      return 'Не удалось отправить сообщение: $e';
+    }
+  }
+
+  Future<List<ChatMessage>> _loadLocalChat(String region) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('${_localChatKey}_$region');
+    if (raw == null || raw.isEmpty) return [];
+    final list = jsonDecode(raw) as List<dynamic>;
+    return list
+        .map((e) => ChatMessage.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  Future<void> _saveLocalChat(String region, List<ChatMessage> messages) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      '${_localChatKey}_$region',
+      jsonEncode(
+        messages
+            .map(
+              (m) => {
+                'id': m.id,
+                'region': m.region,
+                'user_id': m.userId,
+                'author_name': m.authorName,
+                'message_text': m.text,
+                'created_at': m.createdAt.toIso8601String(),
+              },
+            )
+            .toList(),
+      ),
+    );
+  }
+
+  (double, double) _offsetCoordinate(
+    double lat,
+    double lon, {
+    required double minMeters,
+    required double maxMeters,
+  }) {
+    final rng = math.Random();
+    final dist = minMeters + rng.nextDouble() * (maxMeters - minMeters);
+    final angle = rng.nextDouble() * 2 * math.pi;
+    final dLat = (dist * math.cos(angle)) / 111320.0;
+    final cosLat = math.cos(lat * math.pi / 180.0).abs().clamp(0.1, 1.0);
+    final dLon = (dist * math.sin(angle)) / (111320.0 * cosLat);
+    return (lat + dLat, lon + dLon);
+  }
+
+  void _updatePendingCounter(List<FishingSpot> spots) {
+    pendingCountNotifier.value = spots.where((s) => !s.isSynced).length;
   }
 
   Future<void> _saveToCache(List<FishingSpot> spots) async {
@@ -117,22 +512,45 @@ class ApiService {
     if (raw == null || raw.isEmpty) return [];
     final List<dynamic> decoded = jsonDecode(raw) as List<dynamic>;
     return decoded
-        .map((e) => FishingSpot.fromJson(e as Map<String, dynamic>))
+        .map((e) => FishingSpot.fromJson(Map<String, dynamic>.from(e as Map)))
         .toList();
   }
 
   List<FishingSpot> _demoSpots(double lat, double lon) {
+    final now = DateTime.now();
     return [
       FishingSpot(
         id: 'demo-1',
-        latitude: lat + 0.004,
-        longitude: lon + 0.006,
-        depthMeters: 6.5,
-        bottomType: 'Ракушечник / бровка',
+        latitude: lat + 0.0022,
+        longitude: lon + 0.0032,
+        depthMeters: 2.2,
+        bottomType: 'Песок / камень',
+        fishSpecies: 'Окунь',
+        fishWeightKg: 0.6,
+        comment: 'Демо-точка на мели: трава и песчаная коса.',
+        createdAt: now.subtract(const Duration(hours: 2)),
+      ),
+      FishingSpot(
+        id: 'demo-2',
+        latitude: lat - 0.0020,
+        longitude: lon + 0.0038,
+        depthMeters: 5.6,
+        bottomType: 'Бровка / свал',
         fishSpecies: 'Судак',
         fishWeightKg: 2.3,
-        comment: 'Выход на зорьке, джиг 18 г, поролон.',
-        createdAt: DateTime.now().subtract(const Duration(hours: 5)),
+        comment: 'Демо-точка на бровке: джиг 18 г, поролон.',
+        createdAt: now.subtract(const Duration(hours: 5)),
+      ),
+      FishingSpot(
+        id: 'demo-3',
+        latitude: lat + 0.0034,
+        longitude: lon - 0.0028,
+        depthMeters: 9.8,
+        bottomType: 'Яма',
+        fishSpecies: 'Щука',
+        fishWeightKg: 4.1,
+        comment: 'Демо-точка на яме: выход на зорьке.',
+        createdAt: now.subtract(const Duration(hours: 9)),
       ),
     ];
   }
