@@ -1,11 +1,28 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'pages/map_page.dart';
 import 'services/api_service.dart';
 
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await ApiService.initSupabase();
+
+  ErrorWidget.builder = (FlutterErrorDetails details) {
+    return Material(
+      color: const Color(0xFF041E2B),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Text(
+            'Ошибка интерфейса:\n${details.exceptionAsString()}',
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+          ),
+        ),
+      ),
+    );
+  };
+
   runApp(const FishingRadarApp());
+  unawaited(ApiService.initSupabase());
 }
 
 class FishingRadarApp extends StatelessWidget {
