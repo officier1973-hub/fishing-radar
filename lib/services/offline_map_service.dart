@@ -3,9 +3,23 @@ import 'dart:math' as math;
 import 'package:flutter/painting.dart';
 import 'package:flutter_map/flutter_map.dart';
 
+class TileDownloadResult {
+  final int processed;
+  final int total;
+  final int saved;
+  final int failed;
+
+  const TileDownloadResult({
+    required this.processed,
+    required this.total,
+    required this.saved,
+    required this.failed,
+  });
+}
+
 class OfflineMapService {
   static const int maxTilesPerDownload = 250;
-  static const String osmUrlTemplate =
+  static const String standardUrlTemplate =
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
   static const String satelliteUrlTemplate =
       'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
@@ -20,8 +34,9 @@ class OfflineMapService {
   NetworkTileProvider createTileProvider() {
     return NetworkTileProvider(
       cachingProvider: _cachingProvider,
+      silenceExceptions: true,
       headers: <String, String>{
-        'User-Agent': 'FishingRadar/0.1.0 (ru.fishingradar.app)',
+        'User-Agent': 'FishingRadar/0.2.0 (ru.fishingradar.app)',
       },
     );
   }
@@ -55,11 +70,11 @@ class OfflineMapService {
     return result;
   }
 
-  Future<int> estimateTileCount({
+  int estimateTileCount({
     required LatLngBounds bounds,
     required int minZoom,
     required int maxZoom,
-  }) async {
+  }) {
     var total = 0;
     final zMin = minZoom.clamp(1, 18);
     final zMax = maxZoom.clamp(zMin, 18);
@@ -75,12 +90,12 @@ class OfflineMapService {
     return total;
   }
 
-  Future<int> downloadRegion({
+  Future<TileDownloadResult> downloadRegion({
     required String urlTemplate,
     required LatLngBounds bounds,
     required int minZoom,
     required int maxZoom,
-    required void Function(int done, int total) onProgress,
+    required void Function(int done, int total, int saved) onProgress,
     required bool Function() isCancelled,
   }) async {
     final tiles = buildTilesForBounds(
@@ -88,7 +103,16 @@ class OfflineMapService {
       minZoom: minZoom,
       maxZoom: maxZoom,
     );
-    if (tiles.isEmpty) return 0;
+    if (tiles.isEmpty) {
+      return const TileDownloadResult(
+        processed: 0,
+        total: 0,
+        saved: 0,
+        failed: 0,
+      );
+    }
+
+    onProgress(0, tiles.length, 0);
 
     final provider = createTileProvider();
     final layerConfig = TileLayer(
@@ -98,7 +122,9 @@ class OfflineMapService {
     );
 
     var done = 0;
-    const batchSize = 4;
+    var saved = 0;
+    var failed = 0;
+    const batchSize = 3;
 
     try {
       for (var i = 0; i < tiles.length; i += batchSize) {
@@ -106,49 +132,78 @@ class OfflineMapService {
         final end = math.min(i + batchSize, tiles.length);
         final batch = tiles.sublist(i, end);
 
-        await Future.wait(
+        final results = await Future.wait(
           batch.map((coords) => _cacheSingleTile(provider, layerConfig, coords)),
         );
 
-        done += batch.length;
-        onProgress(done, tiles.length);
+        for (final ok in results) {
+          done++;
+          if (ok) {
+            saved++;
+          } else {
+            failed++;
+          }
+        }
+        onProgress(done, tiles.length, saved);
+
+        if (end < tiles.length && !isCancelled()) {
+          await Future<void>.delayed(const Duration(milliseconds: 60));
+        }
       }
     } finally {
-      provider.dispose();
+      await provider.dispose();
     }
 
-    return done;
+    return TileDownloadResult(
+      processed: done,
+      total: tiles.length,
+      saved: saved,
+      failed: failed,
+    );
   }
 
-  Future<void> _cacheSingleTile(
+  Future<bool> _cacheSingleTile(
     NetworkTileProvider provider,
     TileLayer layerConfig,
     TileCoordinates coords,
   ) async {
-    final imageProvider = provider.getImage(coords, layerConfig);
-    final completer = Completer<void>();
-    final stream = imageProvider.resolve(ImageConfiguration.empty);
-    late final ImageStreamListener listener;
+    try {
+      final url = provider.getTileUrl(coords, layerConfig);
+      if (_cachingProvider.isSupported) {
+        final existing = await _cachingProvider.getTile(url);
+        if (existing != null) {
+          return true;
+        }
+      }
 
-    listener = ImageStreamListener(
-      (ImageInfo info, bool _) {
-        info.dispose();
-        stream.removeListener(listener);
-        if (!completer.isCompleted) completer.complete();
-      },
-      onError: (_, __) {
-        stream.removeListener(listener);
-        if (!completer.isCompleted) completer.complete();
-      },
-    );
+      final imageProvider = provider.getImage(coords, layerConfig);
+      final completer = Completer<bool>();
+      final stream = imageProvider.resolve(ImageConfiguration.empty);
+      late final ImageStreamListener listener;
 
-    stream.addListener(listener);
-    await completer.future.timeout(
-      const Duration(seconds: 8),
-      onTimeout: () {
-        stream.removeListener(listener);
-      },
-    );
+      listener = ImageStreamListener(
+        (ImageInfo info, bool _) {
+          info.dispose();
+          stream.removeListener(listener);
+          if (!completer.isCompleted) completer.complete(true);
+        },
+        onError: (_, __) {
+          stream.removeListener(listener);
+          if (!completer.isCompleted) completer.complete(false);
+        },
+      );
+
+      stream.addListener(listener);
+      return await completer.future.timeout(
+        const Duration(seconds: 6),
+        onTimeout: () {
+          stream.removeListener(listener);
+          return false;
+        },
+      );
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> clearCache() async {
