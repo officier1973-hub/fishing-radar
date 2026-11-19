@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -12,6 +13,8 @@ import '../services/location_service.dart';
 import '../services/offline_map_service.dart';
 import '../services/track_service.dart';
 import '../widgets/map_sheets.dart';
+import 'auth_page.dart';
+import 'chat_page.dart';
 import 'report_page.dart';
 
 class MapPage extends StatefulWidget {
@@ -31,7 +34,6 @@ class _MapPageState extends State<MapPage> {
 
   late TileProvider _tileProvider;
 
-  // Стартовый центр по умолчанию (Волга / Самара), пока не получен GPS
   LatLng _currentCenter = const LatLng(53.2001, 50.1500);
   LatLng? _myPosition;
   double? _myHeadingDeg;
@@ -42,7 +44,6 @@ class _MapPageState extends State<MapPage> {
   List<FishingSpot> _spots = [];
   MapLayerSettings _settings = const MapLayerSettings();
 
-  // Активный записываемый трек
   final List<LatLng> _trackPoints = [];
   StreamSubscription<Position>? _trackSub;
   bool _isTracking = false;
@@ -50,24 +51,25 @@ class _MapPageState extends State<MapPage> {
   double _trackDistanceMeters = 0.0;
   double _trackMaxSpeedKmh = 0.0;
 
-  // Просматриваемый сохранённый трек
   BoatTrack? _loadedTrack;
 
-  // Навигация к выбранной точке / «на берег»
   LatLng? _navTargetPoint;
   String? _navTargetLabel;
 
-  // Инструмент «Линейка»
   bool _isRulerMode = false;
   final List<LatLng> _rulerPoints = [];
 
   bool _isLoading = true;
+  int _pendingSyncCount = 0;
+  String? _syncStatusNote;
 
   @override
   void initState() {
     super.initState();
     _tileProvider = _createSafeTileProvider();
     ApiService.backendReadyNotifier.addListener(_onBackendReady);
+    ApiService.pendingCountNotifier.addListener(_onStatusChanged);
+    ApiService.lastErrorNotifier.addListener(_onStatusChanged);
     _initData();
   }
 
@@ -85,9 +87,19 @@ class _MapPageState extends State<MapPage> {
     }
   }
 
+  void _onStatusChanged() {
+    if (!mounted) return;
+    setState(() {
+      _pendingSyncCount = ApiService.pendingCountNotifier.value;
+      _syncStatusNote = ApiService.lastErrorNotifier.value;
+    });
+  }
+
   @override
   void dispose() {
     ApiService.backendReadyNotifier.removeListener(_onBackendReady);
+    ApiService.pendingCountNotifier.removeListener(_onStatusChanged);
+    ApiService.lastErrorNotifier.removeListener(_onStatusChanged);
     _trackSub?.cancel();
     _tileProvider.dispose();
     _mapController.dispose();
@@ -117,9 +129,7 @@ class _MapPageState extends State<MapPage> {
         }
         _safeMove(_currentCenter, 14);
       }
-    } catch (_) {
-      // Если GPS/настройки недоступны при старте, всё равно грузим карту и точки
-    }
+    } catch (_) {}
     await _loadSpots();
   }
 
@@ -147,15 +157,40 @@ class _MapPageState extends State<MapPage> {
     _trackService.saveSettings(next);
   }
 
+  void _showGpsErrorSnack(LocationPermission perm) {
+    if (!mounted) return;
+    final forever = perm == LocationPermission.deniedForever;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          forever
+              ? 'Доступ к геолокации запрещён в настройках телефона'
+              : 'Включите GPS и разрешите доступ к геолокации',
+        ),
+        action: forever
+            ? SnackBarAction(
+                label: 'Настройки',
+                onPressed: _locationService.openAppSettings,
+              )
+            : SnackBarAction(
+                label: 'GPS',
+                onPressed: _locationService.openLocationSettings,
+              ),
+      ),
+    );
+  }
+
   Future<void> _goToMyLocation() async {
+    final perm = await _locationService.checkAndRequestPermission();
+    if (perm != LocationPermission.whileInUse &&
+        perm != LocationPermission.always) {
+      _showGpsErrorSnack(perm);
+      return;
+    }
+
     final pos = await _locationService.getCurrentPosition();
     if (pos == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Включите GPS и разрешите доступ к геолокации'),
-        ),
-      );
+      _showGpsErrorSnack(perm);
       return;
     }
     final point = LatLng(pos.latitude, pos.longitude);
@@ -194,12 +229,10 @@ class _MapPageState extends State<MapPage> {
       return;
     }
 
-    final ok = await _locationService.ensurePermission();
-    if (!ok) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Нет разрешения на GPS для записи трека')),
-      );
+    final perm = await _locationService.checkAndRequestPermission();
+    if (perm != LocationPermission.whileInUse &&
+        perm != LocationPermission.always) {
+      _showGpsErrorSnack(perm);
       return;
     }
 
@@ -326,81 +359,277 @@ class _MapPageState extends State<MapPage> {
     });
   }
 
+  void _showMapLongPressMenu(LatLng point) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.add_location_alt),
+              title: const Text('Добавить точку клёва здесь'),
+              subtitle: Text(
+                '${point.latitude.toStringAsFixed(5)}, '
+                '${point.longitude.toStringAsFixed(5)}',
+              ),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _openCreateSpot(point);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.navigation),
+              title: const Text('Проложить курс сюда'),
+              subtitle: const Text('Показать расстояние, азимут и линию курса'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _setNavTarget(point, 'Точка на карте');
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _openCreateSpot(LatLng point) async {
-    final created = await Navigator.of(context).push<FishingSpot>(
+    final result = await Navigator.of(context).push<ReportResult>(
       MaterialPageRoute(builder: (_) => ReportPage(initialPoint: point)),
     );
-    if (created == null) return;
+    if (result == null) return;
 
-    final saved = await _apiService.createSpot(created);
+    final saved = await _apiService.createSpot(
+      result.spot,
+      photoBytes: result.photoBytes,
+      photoExt: result.photoExt,
+    );
     if (!mounted) return;
-    setState(() => _spots.add(saved));
+    setState(() {
+      _spots.removeWhere((s) => s.id.startsWith('demo-'));
+      _spots.insert(0, saved);
+    });
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Точка сохранена на карту')),
+      SnackBar(
+        content: Text(
+          saved.isSynced
+              ? 'Точка сохранена и отправлена в облако'
+              : 'Точка сохранена на телефон (отправится при появлении сети)',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openEditSpot(FishingSpot spot) async {
+    final result = await Navigator.of(context).push<ReportResult>(
+      MaterialPageRoute(
+        builder: (_) => ReportPage(
+          initialPoint: LatLng(spot.latitude, spot.longitude),
+          existingSpot: spot,
+        ),
+      ),
+    );
+    if (result == null) return;
+
+    final updated = await _apiService.updateSpot(
+      result.spot,
+      newPhotoBytes: result.photoBytes,
+      photoExt: result.photoExt,
+    );
+    if (!mounted) return;
+    setState(() {
+      final idx = _spots.indexWhere((s) => s.id == updated.id);
+      if (idx != -1) _spots[idx] = updated;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Точка обновлена')),
+    );
+  }
+
+  Future<void> _confirmDeleteSpot(FishingSpot spot) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Удалить точку?'),
+        content: Text('${spot.fishSpecies} • ${spot.depthMeters} м'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    await _apiService.deleteSpot(spot);
+    if (!mounted) return;
+    setState(() => _spots.removeWhere((s) => s.id == spot.id));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Точка удалена')),
+    );
+  }
+
+  void _openFullPhoto({String? url, String? localPath}) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => Scaffold(
+          backgroundColor: Colors.black,
+          appBar: AppBar(
+            backgroundColor: Colors.black,
+            foregroundColor: Colors.white,
+          ),
+          body: Center(
+            child: InteractiveViewer(
+              child: localPath != null && File(localPath).existsSync()
+                  ? Image.file(File(localPath))
+                  : Image.network(url!),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
   void _showSpotDetails(FishingSpot spot) {
-    final dateStr = DateFormat('dd.MM.yyyy HH:mm').format(spot.createdAt);
-    final spotPoint = LatLng(spot.latitude, spot.longitude);
+    final myId = _apiService.currentUserId;
+    final isMine = spot.isOwnedBy(myId);
+    final spotPoint = spot.displayPointFor(myId);
     final fromPoint = _myPosition ?? _currentCenter;
     final distMeters = _distanceCalc.as(LengthUnit.Meter, fromPoint, spotPoint);
+    final dateStr = DateFormat('dd.MM.yyyy HH:mm').format(spot.createdAt);
+
+    final hasLocalPhoto =
+        spot.localPhotoPath != null && File(spot.localPhotoPath!).existsSync();
+    final hasRemotePhoto = spot.photoUrl != null && spot.photoUrl!.isNotEmpty;
 
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.phishing, size: 28),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    '${spot.fishSpecies} • глубина ${spot.depthMeters} м',
-                    style: Theme.of(ctx).textTheme.titleLarge,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.phishing, size: 28),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '${spot.fishSpecies} • глубина ${spot.depthMeters} м',
+                      style: Theme.of(ctx).textTheme.titleLarge,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              if (hasLocalPhoto || hasRemotePhoto) ...[
+                GestureDetector(
+                  onTap: () => _openFullPhoto(
+                    url: hasRemotePhoto ? spot.photoUrl : null,
+                    localPath: hasLocalPhoto ? spot.localPhotoPath : null,
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: SizedBox(
+                      height: 170,
+                      width: double.infinity,
+                      child: hasLocalPhoto
+                          ? Image.file(
+                              File(spot.localPhotoPath!),
+                              fit: BoxFit.cover,
+                            )
+                          : Image.network(spot.photoUrl!, fit: BoxFit.cover),
+                    ),
                   ),
                 ),
+                const SizedBox(height: 10),
               ],
-            ),
-            const SizedBox(height: 10),
-            Text('Рельеф дна: ${spot.bottomType}'),
-            if (spot.fishWeightKg != null)
-              Text('Вес улова: ${spot.fishWeightKg} кг'),
-            Text('Расстояние: ${formatDistance(distMeters)}'),
-            Text('Дата: $dateStr'),
-            if (spot.isPrivateCircle)
-              const Padding(
-                padding: EdgeInsets.only(top: 6),
-                child: Chip(
-                  avatar: Icon(Icons.shield, size: 18),
-                  label: Text('Зона «Круг доверия» (радиус 250 м)'),
+              Text('Рельеф дна: ${spot.bottomType}'),
+              if (spot.fishWeightKg != null)
+                Text('Вес улова: ${spot.fishWeightKg} кг'),
+              Text('Расстояние: ${formatDistance(distMeters)}'),
+              if (spot.authorName != null && spot.authorName!.isNotEmpty)
+                Text('Рыбак: ${spot.authorName}'),
+              Text('Дата: $dateStr'),
+              if (!spot.isSynced)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Chip(
+                    avatar: Icon(Icons.cloud_off, size: 18),
+                    label: Text('Ждёт интернета для отправки в облако'),
+                  ),
+                ),
+              if (spot.isPrivateCircle)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Chip(
+                    avatar: const Icon(Icons.shield, size: 18),
+                    label: Text(
+                      isMine
+                          ? 'Круг доверия: вы видите точную точку'
+                          : 'Круг доверия: зона 250 м (точная точка скрыта)',
+                    ),
+                  ),
+                ),
+              if (spot.comment.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(spot.comment),
+              ],
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.navigation),
+                  label: const Text('Курс на эту точку'),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    _setNavTarget(
+                      spotPoint,
+                      '${spot.fishSpecies} (${spot.depthMeters} м)',
+                    );
+                  },
                 ),
               ),
-            if (spot.comment.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Text(spot.comment),
+              if (isMine) ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.edit_outlined),
+                        label: const Text('Изменить'),
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          _openEditSpot(spot);
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Удалить'),
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          _confirmDeleteSpot(spot);
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
-            const SizedBox(height: 14),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                icon: const Icon(Icons.navigation),
-                label: const Text('Курс на эту точку'),
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  _setNavTarget(
-                    spotPoint,
-                    '${spot.fishSpecies} (${spot.depthMeters} м)',
-                  );
-                },
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -434,14 +663,22 @@ class _MapPageState extends State<MapPage> {
 
   @override
   Widget build(BuildContext context) {
+    final myId = _apiService.currentUserId;
     final ringCenter = _myPosition ?? _currentCenter;
-    final filteredSpots = _spots
-        .where((s) => _settings.depthFilter.matches(s.depthMeters))
-        .toList();
+
+    final filteredSpots = _spots.where((s) {
+      if (!_settings.depthFilter.matches(s.depthMeters)) return false;
+      if (_settings.onlyMySpots && !s.isOwnedBy(myId)) return false;
+      if (_settings.fishFilter.isNotEmpty) {
+        final q = _settings.fishFilter.toLowerCase();
+        if (!s.fishSpecies.toLowerCase().contains(q)) return false;
+      }
+      return true;
+    }).toList();
 
     final baseUrl = _settings.baseMap == BaseMapType.satellite
         ? OfflineMapService.satelliteUrlTemplate
-        : OfflineMapService.osmUrlTemplate;
+        : OfflineMapService.standardUrlTemplate;
 
     final navOrigin = _myPosition ?? _currentCenter;
     double? navDistanceMeters;
@@ -458,8 +695,17 @@ class _MapPageState extends State<MapPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Fishing Radar'),
+        title: const Text('FishRadar'),
         actions: [
+          IconButton(
+            tooltip: 'Чат водоёмов',
+            icon: const Icon(Icons.forum_outlined),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const ChatPage()),
+              );
+            },
+          ),
           IconButton(
             tooltip: 'Сохранённые треки',
             icon: Icon(
@@ -504,7 +750,7 @@ class _MapPageState extends State<MapPage> {
             },
           ),
           IconButton(
-            tooltip: 'Слои, глубины и кольца',
+            tooltip: 'Слои, глубины и фильтры',
             icon: const Icon(Icons.layers),
             onPressed: () => showLayersSheet(
               context: context,
@@ -513,9 +759,24 @@ class _MapPageState extends State<MapPage> {
             ),
           ),
           IconButton(
-            tooltip: 'Обновить точки',
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadSpots,
+            tooltip: 'Профиль и синхронизация',
+            icon: Badge(
+              isLabelVisible: _pendingSyncCount > 0,
+              label: Text('$_pendingSyncCount'),
+              child: Icon(
+                _apiService.currentUser != null
+                    ? Icons.account_circle
+                    : Icons.account_circle_outlined,
+              ),
+            ),
+            onPressed: () async {
+              final changed = await Navigator.of(context).push<bool>(
+                MaterialPageRoute(builder: (_) => const AuthPage()),
+              );
+              if (changed == true && mounted) {
+                await _loadSpots();
+              }
+            },
           ),
         ],
       ),
@@ -539,7 +800,7 @@ class _MapPageState extends State<MapPage> {
               },
               onLongPress: (_, point) {
                 if (!_isRulerMode) {
-                  _openCreateSpot(point);
+                  _showMapLongPressMenu(point);
                 }
               },
               onPositionChanged: (camera, _) {
@@ -564,29 +825,69 @@ class _MapPageState extends State<MapPage> {
                   tileProvider: _tileProvider,
                   maxNativeZoom: 18,
                 ),
+              // Зоны глубин (увеличенные и контрастные)
               if (_settings.showDepthZones && filteredSpots.isNotEmpty)
+                CircleLayer(
+                  circles: [
+                    ...filteredSpots.map((s) {
+                      final pt = s.displayPointFor(myId);
+                      final color = _depthColor(s.depthMeters);
+                      return CircleMarker(
+                        point: pt,
+                        radius: 220,
+                        useRadiusInMeter: true,
+                        color: color.withValues(alpha: 0.16),
+                        borderColor: color.withValues(alpha: 0.35),
+                        borderStrokeWidth: 1.0,
+                      );
+                    }),
+                    ...filteredSpots.map((s) {
+                      final pt = s.displayPointFor(myId);
+                      final color = _depthColor(s.depthMeters);
+                      return CircleMarker(
+                        point: pt,
+                        radius: 100,
+                        useRadiusInMeter: true,
+                        color: color.withValues(alpha: 0.28),
+                        borderStrokeWidth: 0,
+                      );
+                    }),
+                  ],
+                ),
+              // Тепловая карта клёва (Heatmap)
+              if (_settings.showHeatmap && filteredSpots.isNotEmpty)
                 CircleLayer(
                   circles: [
                     ...filteredSpots.map(
                       (s) => CircleMarker(
-                        point: LatLng(s.latitude, s.longitude),
-                        radius: 115,
+                        point: s.displayPointFor(myId),
+                        radius: 260,
                         useRadiusInMeter: true,
-                        color: _depthColor(s.depthMeters).withValues(alpha: 0.11),
+                        color: Colors.amber.withValues(alpha: 0.14),
                         borderStrokeWidth: 0,
                       ),
                     ),
                     ...filteredSpots.map(
                       (s) => CircleMarker(
-                        point: LatLng(s.latitude, s.longitude),
-                        radius: 50,
+                        point: s.displayPointFor(myId),
+                        radius: 140,
                         useRadiusInMeter: true,
-                        color: _depthColor(s.depthMeters).withValues(alpha: 0.22),
+                        color: Colors.deepOrange.withValues(alpha: 0.22),
+                        borderStrokeWidth: 0,
+                      ),
+                    ),
+                    ...filteredSpots.map(
+                      (s) => CircleMarker(
+                        point: s.displayPointFor(myId),
+                        radius: 65,
+                        useRadiusInMeter: true,
+                        color: Colors.redAccent.withValues(alpha: 0.32),
                         borderStrokeWidth: 0,
                       ),
                     ),
                   ],
                 ),
+              // Кольца расстояний
               if (_settings.ringPreset.radii.isNotEmpty)
                 CircleLayer(
                   circles: _settings.ringPreset.radii
@@ -596,7 +897,7 @@ class _MapPageState extends State<MapPage> {
                           radius: r,
                           useRadiusInMeter: true,
                           color: Colors.transparent,
-                          borderColor: Colors.blue.withValues(alpha: 0.50),
+                          borderColor: Colors.blue.withValues(alpha: 0.55),
                           borderStrokeWidth: 1.5,
                         ),
                       )
@@ -617,7 +918,7 @@ class _MapPageState extends State<MapPage> {
                             vertical: 1,
                           ),
                           decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.55),
+                            color: Colors.black.withValues(alpha: 0.60),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
@@ -633,20 +934,22 @@ class _MapPageState extends State<MapPage> {
                     );
                   }).toList(),
                 ),
+              // Приватные зоны «Круг доверия» (радиус 250 м)
               CircleLayer(
-                circles: filteredSpots
-                    .where((s) => s.isPrivateCircle)
-                    .map(
-                      (s) => CircleMarker(
-                        point: LatLng(s.latitude, s.longitude),
-                        radius: 250,
-                        useRadiusInMeter: true,
-                        color: Colors.orange.withValues(alpha: 0.16),
-                        borderColor: Colors.orange.withValues(alpha: 0.7),
-                        borderStrokeWidth: 1.5,
-                      ),
-                    )
-                    .toList(),
+                circles: filteredSpots.where((s) => s.isPrivateCircle).map((s) {
+                  final center = (s.publicLatitude != null &&
+                          s.publicLongitude != null)
+                      ? LatLng(s.publicLatitude!, s.publicLongitude!)
+                      : s.displayPointFor(myId);
+                  return CircleMarker(
+                    point: center,
+                    radius: 250,
+                    useRadiusInMeter: true,
+                    color: Colors.orange.withValues(alpha: 0.16),
+                    borderColor: Colors.orange.withValues(alpha: 0.75),
+                    borderStrokeWidth: 1.5,
+                  );
+                }).toList(),
               ),
               if (_loadedTrack != null && _loadedTrack!.points.length >= 2)
                 PolylineLayer(
@@ -751,10 +1054,12 @@ class _MapPageState extends State<MapPage> {
                       ),
                     ),
                   ),
-                  ...filteredSpots.map(
-                    (spot) => Marker(
-                      point: LatLng(spot.latitude, spot.longitude),
-                      width: 56,
+                  ...filteredSpots.map((spot) {
+                    final pt = spot.displayPointFor(myId);
+                    final color = _depthColor(spot.depthMeters);
+                    return Marker(
+                      point: pt,
+                      width: 58,
                       height: 44,
                       child: GestureDetector(
                         onTap: () => _showSpotDetails(spot),
@@ -767,7 +1072,7 @@ class _MapPageState extends State<MapPage> {
                                 vertical: 2,
                               ),
                               decoration: BoxDecoration(
-                                color: _depthColor(spot.depthMeters),
+                                color: color,
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               child: Text(
@@ -783,16 +1088,14 @@ class _MapPageState extends State<MapPage> {
                               spot.isPrivateCircle
                                   ? Icons.shield
                                   : Icons.location_on,
-                              color: spot.isPrivateCircle
-                                  ? Colors.orange
-                                  : _depthColor(spot.depthMeters),
+                              color: spot.isPrivateCircle ? Colors.orange : color,
                               size: 22,
                             ),
                           ],
                         ),
                       ),
-                    ),
-                  ),
+                    );
+                  }),
                 ],
               ),
               const Scalebar(
@@ -816,7 +1119,7 @@ class _MapPageState extends State<MapPage> {
               left: 12,
               right: 96,
               child: Card(
-                color: Colors.black.withValues(alpha: 0.80),
+                color: Colors.black.withValues(alpha: 0.82),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12,
@@ -971,13 +1274,31 @@ class _MapPageState extends State<MapPage> {
                               ),
                             ),
                         ] else
-                          Text(
-                            'Долгое нажатие — добавить точку',
-                            style: Theme.of(context).textTheme.bodySmall,
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'Долгое нажатие — точка или курс',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                              const SizedBox(width: 6),
+                              InkWell(
+                                onTap: _loadSpots,
+                                child: const Icon(Icons.refresh, size: 17),
+                              ),
+                            ],
                           ),
-                        if (!_apiService.isBackendConfigured)
+                        if (_pendingSyncCount > 0)
                           Text(
-                            'Режим офлайн-кеша (Supabase не подключён)',
+                            'В очереди отправки: $_pendingSyncCount т.',
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(color: Colors.orange[800]),
+                          )
+                        else if (_syncStatusNote != null)
+                          Text(
+                            _syncStatusNote!,
                             style: Theme.of(context)
                                 .textTheme
                                 .labelSmall
