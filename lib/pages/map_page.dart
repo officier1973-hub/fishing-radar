@@ -29,7 +29,7 @@ class _MapPageState extends State<MapPage> {
   final OfflineMapService _offlineService = OfflineMapService();
   final Distance _distanceCalc = const Distance();
 
-  late final NetworkTileProvider _tileProvider;
+  late TileProvider _tileProvider;
 
   // Стартовый центр по умолчанию (Волга / Самара), пока не получен GPS
   LatLng _currentCenter = const LatLng(53.2001, 50.1500);
@@ -37,6 +37,7 @@ class _MapPageState extends State<MapPage> {
   double? _myHeadingDeg;
   double _speedKmh = 0.0;
   double _mapRotationDeg = 0.0;
+  bool _isMapReady = false;
 
   List<FishingSpot> _spots = [];
   MapLayerSettings _settings = const MapLayerSettings();
@@ -65,47 +66,80 @@ class _MapPageState extends State<MapPage> {
   @override
   void initState() {
     super.initState();
-    _tileProvider = _offlineService.createTileProvider();
+    _tileProvider = _createSafeTileProvider();
+    ApiService.backendReadyNotifier.addListener(_onBackendReady);
     _initData();
+  }
+
+  TileProvider _createSafeTileProvider() {
+    try {
+      return _offlineService.createTileProvider();
+    } catch (_) {
+      return NetworkTileProvider();
+    }
+  }
+
+  void _onBackendReady() {
+    if (ApiService.backendReadyNotifier.value && mounted) {
+      _loadSpots();
+    }
   }
 
   @override
   void dispose() {
+    ApiService.backendReadyNotifier.removeListener(_onBackendReady);
     _trackSub?.cancel();
     _tileProvider.dispose();
     _mapController.dispose();
     super.dispose();
   }
 
-  Future<void> _initData() async {
-    final savedSettings = await _trackService.loadSettings();
-    if (mounted) {
-      setState(() => _settings = savedSettings);
-    }
+  void _safeMove(LatLng center, double zoom) {
+    if (!_isMapReady) return;
+    try {
+      _mapController.move(center, zoom);
+    } catch (_) {}
+  }
 
-    final pos = await _locationService.getCurrentPosition();
-    if (pos != null && mounted) {
-      _myPosition = LatLng(pos.latitude, pos.longitude);
-      _currentCenter = _myPosition!;
-      if (pos.heading >= 0) {
-        _myHeadingDeg = pos.heading;
+  Future<void> _initData() async {
+    try {
+      final savedSettings = await _trackService.loadSettings();
+      if (mounted) {
+        setState(() => _settings = savedSettings);
       }
-      _mapController.move(_currentCenter, 14);
+
+      final pos = await _locationService.getCurrentPosition();
+      if (pos != null && mounted) {
+        _myPosition = LatLng(pos.latitude, pos.longitude);
+        _currentCenter = _myPosition!;
+        if (pos.heading >= 0) {
+          _myHeadingDeg = pos.heading;
+        }
+        _safeMove(_currentCenter, 14);
+      }
+    } catch (_) {
+      // Если GPS/настройки недоступны при старте, всё равно грузим карту и точки
     }
     await _loadSpots();
   }
 
   Future<void> _loadSpots() async {
-    setState(() => _isLoading = true);
-    final spots = await _apiService.getSpots(
-      lat: _currentCenter.latitude,
-      lon: _currentCenter.longitude,
-    );
     if (!mounted) return;
-    setState(() {
-      _spots = spots;
-      _isLoading = false;
-    });
+    setState(() => _isLoading = true);
+    try {
+      final spots = await _apiService.getSpots(
+        lat: _currentCenter.latitude,
+        lon: _currentCenter.longitude,
+      );
+      if (!mounted) return;
+      setState(() {
+        _spots = spots;
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+    }
   }
 
   void _updateSettings(MapLayerSettings next) {
@@ -130,7 +164,7 @@ class _MapPageState extends State<MapPage> {
       _currentCenter = point;
       if (pos.heading >= 0) _myHeadingDeg = pos.heading;
     });
-    _mapController.move(point, 15);
+    _safeMove(point, 15);
   }
 
   Future<void> _toggleTrackRecording() async {
@@ -440,7 +474,7 @@ class _MapPageState extends State<MapPage> {
               activeLoadedTrack: _loadedTrack,
               onSelectTrack: (track) {
                 setState(() => _loadedTrack = track);
-                if (track != null && track.points.length >= 2) {
+                if (track != null && track.points.length >= 2 && _isMapReady) {
                   _mapController.fitCamera(
                     CameraFit.bounds(
                       bounds: LatLngBounds.fromPoints(track.points),
@@ -454,12 +488,20 @@ class _MapPageState extends State<MapPage> {
           IconButton(
             tooltip: 'Офлайн-карты (скачать район)',
             icon: const Icon(Icons.cloud_download_outlined),
-            onPressed: () => showOfflineCacheSheet(
-              context: context,
-              offlineService: _offlineService,
-              visibleBounds: _mapController.camera.visibleBounds,
-              baseMap: _settings.baseMap,
-            ),
+            onPressed: () {
+              if (!_isMapReady) return;
+              showOfflineCacheSheet(
+                context: context,
+                offlineService: _offlineService,
+                visibleBounds: _mapController.camera.visibleBounds,
+                baseMap: _settings.baseMap,
+                onCacheCleared: () {
+                  final old = _tileProvider;
+                  setState(() => _tileProvider = _createSafeTileProvider());
+                  old.dispose();
+                },
+              );
+            },
           ),
           IconButton(
             tooltip: 'Слои, глубины и кольца',
@@ -484,6 +526,12 @@ class _MapPageState extends State<MapPage> {
             options: MapOptions(
               initialCenter: _currentCenter,
               initialZoom: 13,
+              onMapReady: () {
+                _isMapReady = true;
+                if (_myPosition != null) {
+                  _safeMove(_myPosition!, 14);
+                }
+              },
               onTap: (_, point) {
                 if (_isRulerMode) {
                   setState(() => _rulerPoints.add(point));
@@ -516,7 +564,6 @@ class _MapPageState extends State<MapPage> {
                   tileProvider: _tileProvider,
                   maxNativeZoom: 18,
                 ),
-              // Батиметрические зоны (по точкам глубин)
               if (_settings.showDepthZones && filteredSpots.isNotEmpty)
                 CircleLayer(
                   circles: [
@@ -540,7 +587,6 @@ class _MapPageState extends State<MapPage> {
                     ),
                   ],
                 ),
-              // Кольца расстояний
               if (_settings.ringPreset.radii.isNotEmpty)
                 CircleLayer(
                   circles: _settings.ringPreset.radii
@@ -556,7 +602,6 @@ class _MapPageState extends State<MapPage> {
                       )
                       .toList(),
                 ),
-              // Подписи радиусов колец
               if (_settings.ringPreset.radii.isNotEmpty)
                 MarkerLayer(
                   markers: _settings.ringPreset.radii.map((r) {
@@ -588,7 +633,6 @@ class _MapPageState extends State<MapPage> {
                     );
                   }).toList(),
                 ),
-              // Круги доверия для приватных точек (радиус 250 м)
               CircleLayer(
                 circles: filteredSpots
                     .where((s) => s.isPrivateCircle)
@@ -604,7 +648,6 @@ class _MapPageState extends State<MapPage> {
                     )
                     .toList(),
               ),
-              // Загруженный исторический трек
               if (_loadedTrack != null && _loadedTrack!.points.length >= 2)
                 PolylineLayer(
                   polylines: [
@@ -615,7 +658,6 @@ class _MapPageState extends State<MapPage> {
                     ),
                   ],
                 ),
-              // Активный трек лодки
               if (_trackPoints.length >= 2)
                 PolylineLayer(
                   polylines: [
@@ -626,7 +668,6 @@ class _MapPageState extends State<MapPage> {
                     ),
                   ],
                 ),
-              // Пунктирная линия курса к цели
               if (_navTargetPoint != null)
                 PolylineLayer(
                   polylines: [
@@ -638,7 +679,6 @@ class _MapPageState extends State<MapPage> {
                     ),
                   ],
                 ),
-              // Линия «Линейки»
               if (_rulerPoints.length >= 2)
                 PolylineLayer(
                   polylines: [
@@ -649,7 +689,6 @@ class _MapPageState extends State<MapPage> {
                     ),
                   ],
                 ),
-              // Маркеры: лодка, цель, узлы линейки, точки улова
               MarkerLayer(
                 markers: [
                   if (_myPosition != null)
@@ -769,7 +808,6 @@ class _MapPageState extends State<MapPage> {
               right: 0,
               child: LinearProgressIndicator(),
             ),
-          // Навигационный HUD (при выбранной цели)
           if (_navTargetPoint != null &&
               navDistanceMeters != null &&
               navBearingDeg != null)
@@ -830,7 +868,6 @@ class _MapPageState extends State<MapPage> {
                 ),
               ),
             ),
-          // Панель «Линейка»
           if (_isRulerMode)
             Positioned(
               top: _navTargetPoint != null ? 82 : 12,
@@ -872,7 +909,6 @@ class _MapPageState extends State<MapPage> {
                 ),
               ),
             ),
-          // Нижняя карточка статуса + легенда глубин
           Positioned(
             left: 12,
             bottom: 20,
