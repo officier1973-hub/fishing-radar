@@ -78,4 +78,101 @@ class OfflineMapService {
   Future<int> downloadRegion({
     required String urlTemplate,
     required LatLngBounds bounds,
-    requi
+    required int minZoom,
+    required int maxZoom,
+    required void Function(int done, int total) onProgress,
+    required bool Function() isCancelled,
+  }) async {
+    final tiles = buildTilesForBounds(
+      bounds: bounds,
+      minZoom: minZoom,
+      maxZoom: maxZoom,
+    );
+    if (tiles.isEmpty) return 0;
+
+    final provider = createTileProvider();
+    final layerConfig = TileLayer(
+      urlTemplate: urlTemplate,
+      userAgentPackageName: 'ru.fishingradar.app',
+      tileProvider: provider,
+    );
+
+    var done = 0;
+    const batchSize = 4;
+
+    try {
+      for (var i = 0; i < tiles.length; i += batchSize) {
+        if (isCancelled()) break;
+        final end = math.min(i + batchSize, tiles.length);
+        final batch = tiles.sublist(i, end);
+
+        await Future.wait(
+          batch.map((coords) => _cacheSingleTile(provider, layerConfig, coords)),
+        );
+
+        done += batch.length;
+        onProgress(done, tiles.length);
+      }
+    } finally {
+      provider.dispose();
+    }
+
+    return done;
+  }
+
+  Future<void> _cacheSingleTile(
+    NetworkTileProvider provider,
+    TileLayer layerConfig,
+    TileCoordinates coords,
+  ) async {
+    final imageProvider = provider.getImage(coords, layerConfig);
+    final completer = Completer<void>();
+    final stream = imageProvider.resolve(ImageConfiguration.empty);
+    late final ImageStreamListener listener;
+
+    listener = ImageStreamListener(
+      (ImageInfo info, bool _) {
+        info.dispose();
+        stream.removeListener(listener);
+        if (!completer.isCompleted) completer.complete();
+      },
+      onError: (_, __) {
+        stream.removeListener(listener);
+        if (!completer.isCompleted) completer.complete();
+      },
+    );
+
+    stream.addListener(listener);
+    await completer.future.timeout(
+      const Duration(seconds: 8),
+      onTimeout: () {
+        stream.removeListener(listener);
+      },
+    );
+  }
+
+  Future<void> clearCache() async {
+    await _cachingProvider.destroy(deleteCache: true);
+    _cachingProvider = BuiltInMapCachingProvider.getOrCreateInstance(
+      overrideFreshAge: const Duration(days: 30),
+    );
+  }
+
+  int _lonToTileX(double lon, int zoom) {
+    final n = 1 << zoom;
+    final x = ((lon + 180.0) / 360.0 * n).floor();
+    return x.clamp(0, n - 1);
+  }
+
+  int _latToTileY(double lat, int zoom) {
+    final clamped = lat.clamp(-85.05112878, 85.05112878);
+    final latRad = clamped * math.pi / 180.0;
+    final n = 1 << zoom;
+    final y = ((1.0 -
+                math.log(math.tan(latRad) + 1.0 / math.cos(latRad)) / math.pi) /
+            2.0 *
+            n)
+        .floor();
+    return y.clamp(0, n - 1);
+  }
+}
