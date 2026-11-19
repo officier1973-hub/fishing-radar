@@ -1,11 +1,31 @@
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
 import '../models/fishing_spot.dart';
 
+class ReportResult {
+  final FishingSpot spot;
+  final Uint8List? photoBytes;
+  final String photoExt;
+
+  const ReportResult({
+    required this.spot,
+    this.photoBytes,
+    this.photoExt = 'jpg',
+  });
+}
+
 class ReportPage extends StatefulWidget {
   final LatLng initialPoint;
+  final FishingSpot? existingSpot;
 
-  const ReportPage({super.key, required this.initialPoint});
+  const ReportPage({
+    super.key,
+    required this.initialPoint,
+    this.existingSpot,
+  });
 
   @override
   State<ReportPage> createState() => _ReportPageState();
@@ -13,13 +33,20 @@ class ReportPage extends StatefulWidget {
 
 class _ReportPageState extends State<ReportPage> {
   final _formKey = GlobalKey<FormState>();
-  final _depthController = TextEditingController(text: '4.5');
-  final _speciesController = TextEditingController(text: 'Судак');
-  final _weightController = TextEditingController();
-  final _commentController = TextEditingController();
+  final _picker = ImagePicker();
 
-  String _bottomType = 'Бровка / свал';
-  bool _isPrivateCircle = false;
+  late final TextEditingController _depthController;
+  late final TextEditingController _speciesController;
+  late final TextEditingController _weightController;
+  late final TextEditingController _commentController;
+
+  late String _bottomType;
+  late bool _isPrivateCircle;
+
+  Uint8List? _pickedPhotoBytes;
+  String? _pickedPhotoPath;
+  String _pickedPhotoExt = 'jpg';
+  bool _removeExistingPhoto = false;
 
   static const _bottomOptions = [
     'Бровка / свал',
@@ -30,6 +57,27 @@ class _ReportPageState extends State<ReportPage> {
     'Песок / камень',
   ];
 
+  bool get _isEditing => widget.existingSpot != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existingSpot;
+    _depthController = TextEditingController(
+      text: e != null ? e.depthMeters.toString() : '4.5',
+    );
+    _speciesController = TextEditingController(
+      text: e != null ? e.fishSpecies : 'Судак',
+    );
+    _weightController = TextEditingController(
+      text: e?.fishWeightKg != null ? e!.fishWeightKg.toString() : '',
+    );
+    _commentController = TextEditingController(text: e?.comment ?? '');
+    _bottomType = e?.bottomType ?? _bottomOptions.first;
+    _isPrivateCircle = e?.isPrivateCircle ?? false;
+    _pickedPhotoPath = e?.localPhotoPath;
+  }
+
   @override
   void dispose() {
     _depthController.dispose();
@@ -39,6 +87,32 @@ class _ReportPageState extends State<ReportPage> {
     super.dispose();
   }
 
+  Future<void> _pickPhoto(ImageSource source) async {
+    try {
+      final file = await _picker.pickImage(
+        source: source,
+        maxWidth: 1280,
+        imageQuality: 75,
+      );
+      if (file == null) return;
+      final bytes = await file.readAsBytes();
+      final parts = file.name.split('.');
+      final ext = parts.length > 1 ? parts.last.toLowerCase() : 'jpg';
+      if (!mounted) return;
+      setState(() {
+        _pickedPhotoBytes = bytes;
+        _pickedPhotoPath = file.path;
+        _pickedPhotoExt = ext;
+        _removeExistingPhoto = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось выбрать фото')),
+      );
+    }
+  }
+
   void _submit() {
     if (!_formKey.currentState!.validate()) return;
 
@@ -46,26 +120,60 @@ class _ReportPageState extends State<ReportPage> {
     final weightText = _weightController.text.trim().replaceAll(',', '.');
     final weight = weightText.isEmpty ? null : double.tryParse(weightText);
 
-    final spot = FishingSpot(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      latitude: widget.initialPoint.latitude,
-      longitude: widget.initialPoint.longitude,
-      depthMeters: depth,
-      bottomType: _bottomType,
-      fishSpecies: _speciesController.text.trim(),
-      fishWeightKg: weight,
-      comment: _commentController.text.trim(),
-      isPrivateCircle: _isPrivateCircle,
-      createdAt: DateTime.now(),
-    );
+    final base = widget.existingSpot;
+    final spot = base != null
+        ? base.copyWith(
+            depthMeters: depth,
+            bottomType: _bottomType,
+            fishSpecies: _speciesController.text.trim(),
+            fishWeightKg: weight,
+            clearWeight: weight == null,
+            comment: _commentController.text.trim(),
+            isPrivateCircle: _isPrivateCircle,
+            clearPhotoUrl: _removeExistingPhoto,
+            localPhotoPath: _pickedPhotoPath,
+            clearLocalPhotoPath: _removeExistingPhoto,
+          )
+        : FishingSpot(
+            id: 'local-${DateTime.now().millisecondsSinceEpoch}',
+            latitude: widget.initialPoint.latitude,
+            longitude: widget.initialPoint.longitude,
+            depthMeters: depth,
+            bottomType: _bottomType,
+            fishSpecies: _speciesController.text.trim(),
+            fishWeightKg: weight,
+            comment: _commentController.text.trim(),
+            isPrivateCircle: _isPrivateCircle,
+            localPhotoPath: _pickedPhotoPath,
+            createdAt: DateTime.now(),
+          );
 
-    Navigator.of(context).pop(spot);
+    Navigator.of(context).pop(
+      ReportResult(
+        spot: spot,
+        photoBytes: _pickedPhotoBytes,
+        photoExt: _pickedPhotoExt,
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final options = _bottomOptions.contains(_bottomType)
+        ? _bottomOptions
+        : [_bottomType, ..._bottomOptions];
+
+    final existingUrl =
+        _removeExistingPhoto ? null : widget.existingSpot?.photoUrl;
+    final hasLocalFile = !_removeExistingPhoto &&
+        _pickedPhotoBytes == null &&
+        _pickedPhotoPath != null &&
+        File(_pickedPhotoPath!).existsSync();
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Новая точка / отчёт')),
+      appBar: AppBar(
+        title: Text(_isEditing ? 'Редактировать точку' : 'Новая точка / отчёт'),
+      ),
       body: Form(
         key: _formKey,
         child: ListView(
@@ -107,7 +215,7 @@ class _ReportPageState extends State<ReportPage> {
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.layers),
               ),
-              items: _bottomOptions
+              items: options
                   .map((t) => DropdownMenuItem(value: t, child: Text(t)))
                   .toList(),
               onChanged: (v) {
@@ -145,11 +253,74 @@ class _ReportPageState extends State<ReportPage> {
                 border: OutlineInputBorder(),
               ),
             ),
+            const SizedBox(height: 16),
+            Text(
+              'Фото улова или приманки',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 8),
+            if (_pickedPhotoBytes != null || hasLocalFile || existingUrl != null) ...[
+              Stack(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: SizedBox(
+                      height: 180,
+                      width: double.infinity,
+                      child: _pickedPhotoBytes != null
+                          ? Image.memory(_pickedPhotoBytes!, fit: BoxFit.cover)
+                          : hasLocalFile
+                              ? Image.file(
+                                  File(_pickedPhotoPath!),
+                                  fit: BoxFit.cover,
+                                )
+                              : Image.network(existingUrl!, fit: BoxFit.cover),
+                    ),
+                  ),
+                  Positioned(
+                    top: 8,
+                    right: 8,
+                    child: IconButton.filled(
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.black54,
+                      ),
+                      icon: const Icon(Icons.close, color: Colors.white),
+                      onPressed: () => setState(() {
+                        _pickedPhotoBytes = null;
+                        _pickedPhotoPath = null;
+                        _removeExistingPhoto = true;
+                      }),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+            ],
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _pickPhoto(ImageSource.camera),
+                    icon: const Icon(Icons.camera_alt_outlined),
+                    label: const Text('Камера'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _pickPhoto(ImageSource.gallery),
+                    icon: const Icon(Icons.photo_library_outlined),
+                    label: const Text('Галерея'),
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 12),
             SwitchListTile(
+              contentPadding: EdgeInsets.zero,
               title: const Text('Круг доверия (скрыть точную точку)'),
               subtitle: const Text(
-                'Публично покажется зона радиусом 250 м, а не точные координаты',
+                'Другим рыбакам покажется смещённая зона радиусом 250 м; точные координаты видите только вы',
               ),
               value: _isPrivateCircle,
               onChanged: (v) => setState(() => _isPrivateCircle = v),
@@ -158,7 +329,9 @@ class _ReportPageState extends State<ReportPage> {
             FilledButton.icon(
               onPressed: _submit,
               icon: const Icon(Icons.save),
-              label: const Text('Сохранить точку на карту'),
+              label: Text(
+                _isEditing ? 'Сохранить изменения' : 'Сохранить точку на карту',
+              ),
             ),
           ],
         ),
