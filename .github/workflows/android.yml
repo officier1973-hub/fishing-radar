@@ -28,7 +28,12 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Recreate clean Android project and permissions
+      - name: Install SVG converter for launcher icon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin
+
+      - name: Recreate clean Android project, icons and permissions
         shell: bash
         run: |
           rm -rf android /tmp/scaffold
@@ -36,11 +41,14 @@ jobs:
           cp -r /tmp/scaffold/android ./android
           python3 - <<'EOF'
           import re
+          import subprocess
           from pathlib import Path
 
-          p = Path("android/app/src/main/AndroidManifest.xml")
-          text = p.read_text(encoding="utf-8")
+          # 1. Настройка AndroidManifest.xml (имя, права, защита от белого экрана Impeller)
+          manifest_path = Path("android/app/src/main/AndroidManifest.xml")
+          text = manifest_path.read_text(encoding="utf-8")
           text = re.sub(r'android:label="[^"]*"', 'android:label="FishRadar"', text, count=1)
+
           perms = [
               '<uses-permission android:name="android.permission.INTERNET" />',
               '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
@@ -49,7 +57,91 @@ jobs:
           missing = [perm for perm in perms if perm.split('"')[1] not in text]
           if missing:
               text = text.replace("<application", "\n    ".join(missing) + "\n    <application", 1)
-          p.write_text(text, encoding="utf-8")
+
+          impeller_meta = '<meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />'
+          if "EnableImpeller" not in text:
+              text = text.replace("</application>", f"    {impeller_meta}\n    </application>", 1)
+
+          manifest_path.write_text(text, encoding="utf-8")
+
+          # 2. Генерация иконок и экрана запуска из assets/icon/fish_radar_icon.svg
+          svg_path = Path("assets/icon/fish_radar_icon.svg")
+          if svg_path.exists():
+              svg_raw = svg_path.read_text(encoding="utf-8")
+              bg_match = re.search(r'<rect[^>]*id="bg"[^>]*fill="([^"]+)"', svg_raw)
+              bg_color = bg_match.group(1) if bg_match else "#041E2B"
+
+              # Версия без фона для adaptive foreground и логотипа на splash screen
+              fg_svg_path = Path("/tmp/fg_icon.svg")
+              fg_svg_raw = re.sub(r'<rect[^>]*id="bg"[^>]*/>', "", svg_raw)
+              fg_svg_path.write_text(fg_svg_raw, encoding="utf-8")
+
+              res_dir = Path("android/app/src/main/res")
+
+              # Классические mipmap-иконки
+              sizes = {
+                  "mipmap-mdpi": 48,
+                  "mipmap-hdpi": 72,
+                  "mipmap-xhdpi": 96,
+                  "mipmap-xxhdpi": 144,
+                  "mipmap-xxxhdpi": 192,
+              }
+              for folder, px in sizes.items():
+                  out_dir = res_dir / folder
+                  out_dir.mkdir(parents=True, exist_ok=True)
+                  subprocess.run(
+                      ["rsvg-convert", "-w", str(px), "-h", str(px), str(svg_path), "-o", str(out_dir / "ic_launcher.png")],
+                      check=True,
+                  )
+
+              # Adaptive icon foreground + splash logo
+              draw_xxxhdpi = res_dir / "drawable-xxxhdpi"
+              draw_xxxhdpi.mkdir(parents=True, exist_ok=True)
+              subprocess.run(
+                  ["rsvg-convert", "-w", "432", "-h", "432", str(fg_svg_path), "-o", str(draw_xxxhdpi / "ic_launcher_foreground.png")],
+                  check=True,
+              )
+              subprocess.run(
+                  ["rsvg-convert", "-w", "288", "-h", "288", str(fg_svg_path), "-o", str(draw_xxxhdpi / "ic_splash_logo.png")],
+                  check=True,
+              )
+
+              values_dir = res_dir / "values"
+              values_dir.mkdir(parents=True, exist_ok=True)
+              (values_dir / "colors.xml").write_text(
+                  f'<?xml version="1.0" encoding="utf-8"?>\n'
+                  f'<resources>\n'
+                  f'    <color name="ic_launcher_background">{bg_color}</color>\n'
+                  f'</resources>\n',
+                  encoding="utf-8",
+              )
+
+              anydpi = res_dir / "mipmap-anydpi-v26"
+              anydpi.mkdir(parents=True, exist_ok=True)
+              (anydpi / "ic_launcher.xml").write_text(
+                  '<?xml version="1.0" encoding="utf-8"?>\n'
+                  '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+                  '    <background android:drawable="@color/ic_launcher_background"/>\n'
+                  '    <foreground android:drawable="@drawable/ic_launcher_foreground"/>\n'
+                  '</adaptive-icon>\n',
+                  encoding="utf-8",
+              )
+
+              splash_xml = (
+                  '<?xml version="1.0" encoding="utf-8"?>\n'
+                  '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">\n'
+                  '    <item android:drawable="@color/ic_launcher_background"/>\n'
+                  '    <item>\n'
+                  '        <bitmap\n'
+                  '            android:gravity="center"\n'
+                  '            android:src="@drawable/ic_splash_logo"/>\n'
+                  '    </item>\n'
+                  '</layer-list>\n'
+              )
+              for d in ("drawable", "drawable-v21"):
+                  ddir = res_dir / d
+                  ddir.mkdir(parents=True, exist_ok=True)
+                  (ddir / "launch_background.xml").write_text(splash_xml, encoding="utf-8")
           EOF
 
       - name: Install dependencies
