@@ -28,15 +28,19 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Configure Gradle Google mirror for Maven Central
+      - name: Configure Gradle mirrors for Maven Central and Plugin Portal
         shell: bash
         run: |
           mkdir -p ~/.gradle/init.d
           cat <<'EOF' > ~/.gradle/init.d/maven-central-mirror.gradle
           def central = ~/^https:\/\/(repo\.maven\.apache\.org|repo1\.maven\.org)\/maven2\/?/
-          def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
-          def fallbackName = 'mavenCentralBehindMirror'
+          def googleMirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+          def jbCentralMirror = 'https://cache-redirector.jetbrains.com/maven-central'
+          def jbPluginMirror = 'https://cache-redirector.jetbrains.com/plugins.gradle.org/m2'
           def mirrorName = 'googleMavenCentralMirror'
+          def jbMirrorName = 'jetbrainsMavenCentralMirror'
+          def jbPluginMirrorName = 'jetbrainsPluginPortalMirror'
+          def fallbackName = 'mavenCentralBehindMirror'
 
           def addFallback = { RepositoryHandler repositories ->
               if (repositories.findByName(fallbackName) == null) {
@@ -50,13 +54,16 @@ jobs:
           def toMirror = { RepositoryHandler repositories ->
               def hasFallback = false
               repositories.all { repository ->
-                  if (repository.name == fallbackName || repository.name == mirrorName) {
+                  if (repository.name == fallbackName ||
+                      repository.name == mirrorName ||
+                      repository.name == jbMirrorName ||
+                      repository.name == jbPluginMirrorName) {
                       return
                   }
                   if (repository instanceof MavenArtifactRepository) {
                       def url = repository.url.toString()
                       if (url =~ central) {
-                          repository.url = url.replaceFirst(central, mirror)
+                          repository.url = url.replaceFirst(central, googleMirror)
                           if (!hasFallback) {
                               hasFallback = true
                               addFallback(repositories)
@@ -83,17 +90,35 @@ jobs:
               if (repos.isEmpty()) {
                   repos.maven {
                       name = mirrorName
-                      url = mirror
+                      url = googleMirror
+                  }
+                  repos.maven {
+                      name = jbMirrorName
+                      url = jbCentralMirror
+                  }
+                  repos.gradlePluginPortal()
+                  repos.maven {
+                      name = jbPluginMirrorName
+                      url = jbPluginMirror
                   }
                   addFallback(repos)
-                  repos.gradlePluginPortal()
-              } else if (repos.findByName(mirrorName) == null) {
-                  def m = repos.maven {
-                      name = mirrorName
-                      url = mirror
+              } else {
+                  if (repos.findByName(jbMirrorName) == null) {
+                      def jb = repos.maven {
+                          name = jbMirrorName
+                          url = jbCentralMirror
+                      }
+                      repos.remove(jb)
+                      repos.addFirst(jb)
                   }
-                  repos.remove(m)
-                  repos.addFirst(m)
+                  if (repos.findByName(mirrorName) == null) {
+                      def m = repos.maven {
+                          name = mirrorName
+                          url = googleMirror
+                      }
+                      repos.remove(m)
+                      repos.addFirst(m)
+                  }
               }
           }
 
