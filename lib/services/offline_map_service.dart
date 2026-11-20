@@ -31,10 +31,10 @@ class OfflineMapService {
     overrideFreshAge: const Duration(days: 30),
   );
 
-  NetworkTileProvider createTileProvider() {
+  NetworkTileProvider createTileProvider({bool silenceExceptions = true}) {
     return NetworkTileProvider(
       cachingProvider: _cachingProvider,
-      silenceExceptions: true,
+      silenceExceptions: silenceExceptions,
       headers: <String, String>{
         'User-Agent': 'FishingRadar/0.2.0 (ru.fishingradar.app)',
       },
@@ -90,6 +90,41 @@ class OfflineMapService {
     return total;
   }
 
+  Future<(int cached, int total)> countCachedTiles({
+    required String urlTemplate,
+    required LatLngBounds bounds,
+    required int minZoom,
+    required int maxZoom,
+  }) async {
+    final tiles = buildTilesForBounds(
+      bounds: bounds,
+      minZoom: minZoom,
+      maxZoom: maxZoom,
+    );
+    if (tiles.isEmpty || !_cachingProvider.isSupported) {
+      return (0, tiles.length);
+    }
+
+    final provider = createTileProvider(silenceExceptions: true);
+    final layerConfig = TileLayer(
+      urlTemplate: urlTemplate,
+      userAgentPackageName: 'ru.fishingradar.app',
+      tileProvider: provider,
+    );
+
+    var cached = 0;
+    try {
+      for (final coords in tiles) {
+        final url = provider.getTileUrl(coords, layerConfig);
+        final hit = await _cachingProvider.getTile(url);
+        if (hit != null) cached++;
+      }
+    } finally {
+      await provider.dispose();
+    }
+    return (cached, tiles.length);
+  }
+
   Future<TileDownloadResult> downloadRegion({
     required String urlTemplate,
     required LatLngBounds bounds,
@@ -114,7 +149,7 @@ class OfflineMapService {
 
     onProgress(0, tiles.length, 0);
 
-    final provider = createTileProvider();
+    final provider = createTileProvider(silenceExceptions: false);
     final layerConfig = TileLayer(
       urlTemplate: urlTemplate,
       userAgentPackageName: 'ru.fishingradar.app',
@@ -123,8 +158,8 @@ class OfflineMapService {
 
     var done = 0;
     var saved = 0;
-    var failed = 0;
-    const batchSize = 3;
+    final retryQueue = <TileCoordinates>[];
+    const batchSize = 2;
 
     try {
       for (var i = 0; i < tiles.length; i += batchSize) {
@@ -136,18 +171,28 @@ class OfflineMapService {
           batch.map((coords) => _cacheSingleTile(provider, layerConfig, coords)),
         );
 
-        for (final ok in results) {
+        for (var j = 0; j < batch.length; j++) {
           done++;
-          if (ok) {
+          if (results[j]) {
             saved++;
           } else {
-            failed++;
+            retryQueue.add(batch[j]);
           }
         }
         onProgress(done, tiles.length, saved);
 
         if (end < tiles.length && !isCancelled()) {
-          await Future<void>.delayed(const Duration(milliseconds: 60));
+          await Future<void>.delayed(const Duration(milliseconds: 90));
+        }
+      }
+
+      for (final coords in retryQueue) {
+        if (isCancelled()) break;
+        await Future<void>.delayed(const Duration(milliseconds: 180));
+        final ok = await _cacheSingleTile(provider, layerConfig, coords);
+        if (ok) {
+          saved++;
+          onProgress(done, tiles.length, saved);
         }
       }
     } finally {
@@ -158,7 +203,7 @@ class OfflineMapService {
       processed: done,
       total: tiles.length,
       saved: saved,
-      failed: failed,
+      failed: tiles.length - saved,
     );
   }
 
@@ -195,7 +240,7 @@ class OfflineMapService {
 
       stream.addListener(listener);
       return await completer.future.timeout(
-        const Duration(seconds: 6),
+        const Duration(seconds: 10),
         onTimeout: () {
           stream.removeListener(listener);
           return false;
