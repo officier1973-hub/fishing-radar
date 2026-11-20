@@ -186,7 +186,12 @@ Future<void> showOfflineCacheSheet({
       var done = 0;
       var total = 0;
       var saved = 0;
+      var cacheCheckTick = 0;
       String? statusMessage;
+
+      final url = baseMap == BaseMapType.satellite
+          ? OfflineMapService.satelliteUrlTemplate
+          : OfflineMapService.standardUrlTemplate;
 
       return StatefulBuilder(
         builder: (ctx, setSheetState) {
@@ -216,9 +221,38 @@ Future<void> showOfflineCacheSheet({
                   const SizedBox(height: 6),
                   const Text(
                     'Просмотренные участки сохраняются на 30 дней автоматически. '
-                    'Здесь можно заранее скачать текущий экран перед выходом на воду.',
+                    'Нажмите «Скачать область» перед выходом на воду. Проверить работу '
+                    'можно, включив «Режим полёта» на телефоне и полистав карту.',
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 10),
+                  FutureBuilder<(int, int)>(
+                    key: ValueKey('$cacheCheckTick-$detailedZoom'),
+                    future: offlineService.countCachedTiles(
+                      urlTemplate: url,
+                      bounds: visibleBounds,
+                      minZoom: minZoom,
+                      maxZoom: maxZoom,
+                    ),
+                    builder: (_, snap) {
+                      if (!snap.hasData) {
+                        return const SizedBox.shrink();
+                      }
+                      final (cached, all) = snap.data!;
+                      final pct = all > 0 ? ((cached / all) * 100).round() : 0;
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Chip(
+                          avatar: Icon(
+                            pct == 100 ? Icons.check_circle : Icons.sd_storage,
+                            size: 18,
+                          ),
+                          label: Text(
+                            'В памяти телефона для этого экрана: $cached из $all ($pct%)',
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Высокая детализация (зум 12–15)'),
@@ -240,7 +274,7 @@ Future<void> showOfflineCacheSheet({
                       value: total > 0 ? (done / total).clamp(0.0, 1.0) : 0.0,
                     ),
                     const SizedBox(height: 6),
-                    Text('Загружено: $done из $total (сохранено: $saved)'),
+                    Text('Обработано: $done из $total • сохранено: $saved'),
                   ],
                   if (statusMessage != null) ...[
                     const SizedBox(height: 10),
@@ -273,10 +307,6 @@ Future<void> showOfflineCacheSheet({
                             });
 
                             try {
-                              final url = baseMap == BaseMapType.satellite
-                                  ? OfflineMapService.satelliteUrlTemplate
-                                  : OfflineMapService.standardUrlTemplate;
-
                               final result = await offlineService.downloadRegion(
                                 urlTemplate: url,
                                 bounds: visibleBounds,
@@ -295,15 +325,20 @@ Future<void> showOfflineCacheSheet({
 
                               if (!ctx.mounted) return;
                               setSheetState(() {
+                                cacheCheckTick++;
                                 if (isCancelled) {
                                   statusMessage =
                                       'Остановлено: сохранено ${result.saved} из ${result.total}.';
                                 } else if (result.saved == 0 && result.total > 0) {
                                   statusMessage =
                                       'Не удалось скачать карту — проверьте интернет.';
+                                } else if (result.failed > 0) {
+                                  statusMessage =
+                                      'Сохранено ${result.saved} из ${result.total} '
+                                      '(пропущено ${result.failed} — нажмите ещё раз для докачки).';
                                 } else {
                                   statusMessage =
-                                      'Готово! Сохранено ${result.saved} из ${result.total} фрагментов.';
+                                      'Готово! Сохранены все ${result.saved} из ${result.total} фрагментов.';
                                 }
                               });
                             } catch (e) {
@@ -330,6 +365,7 @@ Future<void> showOfflineCacheSheet({
                                 onCacheCleared?.call();
                                 if (!ctx.mounted) return;
                                 setSheetState(() {
+                                  cacheCheckTick++;
                                   statusMessage = 'Кеш карт очищен.';
                                 });
                               },
@@ -441,17 +477,3 @@ Future<void> showSavedTracksSheet({
                                 Navigator.of(ctx).pop();
                               },
                             );
-                          },
-                        ),
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      );
-    },
-  );
-}
