@@ -8,14 +8,20 @@ class TileDownloadResult {
   final int total;
   final int saved;
   final int failed;
+  final int timeouts;
+  final int errors;
 
   const TileDownloadResult({
     required this.processed,
     required this.total,
     required this.saved,
     required this.failed,
+    required this.timeouts,
+    required this.errors,
   });
 }
+
+enum _TileFetchStatus { ok, timeout, error }
 
 class OfflineMapService {
   static const int maxTilesPerDownload = 250;
@@ -130,7 +136,8 @@ class OfflineMapService {
     required LatLngBounds bounds,
     required int minZoom,
     required int maxZoom,
-    required void Function(int done, int total, int saved) onProgress,
+    required void Function(int done, int total, int saved, String phase)
+        onProgress,
     required bool Function() isCancelled,
   }) async {
     final tiles = buildTilesForBounds(
@@ -144,10 +151,12 @@ class OfflineMapService {
         total: 0,
         saved: 0,
         failed: 0,
+        timeouts: 0,
+        errors: 0,
       );
     }
 
-    onProgress(0, tiles.length, 0);
+    onProgress(0, tiles.length, 0, 'Загрузка фрагментов');
 
     final provider = createTileProvider(silenceExceptions: false);
     final layerConfig = TileLayer(
@@ -158,6 +167,8 @@ class OfflineMapService {
 
     var done = 0;
     var saved = 0;
+    var timeouts = 0;
+    var errors = 0;
     final retryQueue = <TileCoordinates>[];
     const batchSize = 2;
 
@@ -173,26 +184,45 @@ class OfflineMapService {
 
         for (var j = 0; j < batch.length; j++) {
           done++;
-          if (results[j]) {
+          if (results[j] == _TileFetchStatus.ok) {
             saved++;
           } else {
             retryQueue.add(batch[j]);
           }
         }
-        onProgress(done, tiles.length, saved);
+        onProgress(done, tiles.length, saved, 'Загрузка фрагментов');
 
         if (end < tiles.length && !isCancelled()) {
-          await Future<void>.delayed(const Duration(milliseconds: 90));
+          await Future<void>.delayed(const Duration(milliseconds: 160));
         }
       }
 
-      for (final coords in retryQueue) {
-        if (isCancelled()) break;
-        await Future<void>.delayed(const Duration(milliseconds: 180));
-        final ok = await _cacheSingleTile(provider, layerConfig, coords);
-        if (ok) {
-          saved++;
-          onProgress(done, tiles.length, saved);
+      if (retryQueue.isNotEmpty && !isCancelled()) {
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        var retryDone = 0;
+        for (final coords in retryQueue) {
+          if (isCancelled()) {
+            errors += retryQueue.length - retryDone;
+            break;
+          }
+          final status = await _cacheSingleTile(provider, layerConfig, coords);
+          retryDone++;
+          if (status == _TileFetchStatus.ok) {
+            saved++;
+          } else if (status == _TileFetchStatus.timeout) {
+            timeouts++;
+          } else {
+            errors++;
+          }
+          onProgress(
+            retryDone,
+            retryQueue.length,
+            saved,
+            'Докачка пропущенных',
+          );
+          if (retryDone < retryQueue.length && !isCancelled()) {
+            await Future<void>.delayed(const Duration(milliseconds: 260));
+          }
         }
       }
     } finally {
@@ -204,10 +234,12 @@ class OfflineMapService {
       total: tiles.length,
       saved: saved,
       failed: tiles.length - saved,
+      timeouts: timeouts,
+      errors: errors,
     );
   }
 
-  Future<bool> _cacheSingleTile(
+  Future<_TileFetchStatus> _cacheSingleTile(
     NetworkTileProvider provider,
     TileLayer layerConfig,
     TileCoordinates coords,
@@ -217,12 +249,12 @@ class OfflineMapService {
       if (_cachingProvider.isSupported) {
         final existing = await _cachingProvider.getTile(url);
         if (existing != null) {
-          return true;
+          return _TileFetchStatus.ok;
         }
       }
 
       final imageProvider = provider.getImage(coords, layerConfig);
-      final completer = Completer<bool>();
+      final completer = Completer<_TileFetchStatus>();
       final stream = imageProvider.resolve(ImageConfiguration.empty);
       late final ImageStreamListener listener;
 
@@ -230,11 +262,13 @@ class OfflineMapService {
         (ImageInfo info, bool _) {
           info.dispose();
           stream.removeListener(listener);
-          if (!completer.isCompleted) completer.complete(true);
+          if (!completer.isCompleted) completer.complete(_TileFetchStatus.ok);
         },
         onError: (_, __) {
           stream.removeListener(listener);
-          if (!completer.isCompleted) completer.complete(false);
+          if (!completer.isCompleted) {
+            completer.complete(_TileFetchStatus.error);
+          }
         },
       );
 
@@ -243,11 +277,11 @@ class OfflineMapService {
         const Duration(seconds: 10),
         onTimeout: () {
           stream.removeListener(listener);
-          return false;
+          return _TileFetchStatus.timeout;
         },
       );
     } catch (_) {
-      return false;
+      return _TileFetchStatus.error;
     }
   }
 
