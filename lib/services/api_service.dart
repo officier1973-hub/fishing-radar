@@ -9,10 +9,12 @@ import '../models/chat_message.dart';
 import '../models/fishing_spot.dart';
 
 class ApiService {
-  static const String supabaseUrl = String.fromEnvironment('SUPABASE_URL');
+  static const String _rawSupabaseUrl = String.fromEnvironment('SUPABASE_URL');
   static const String supabaseKey = String.fromEnvironment('SUPABASE_KEY');
   static const String _cacheKey = 'cached_fishing_spots_v2';
   static const String _localChatKey = 'cached_region_chat_v1';
+
+  static String get supabaseUrl => _normalizeSupabaseUrl(_rawSupabaseUrl);
 
   static final ValueNotifier<bool> backendReadyNotifier =
       ValueNotifier<bool>(false);
@@ -22,6 +24,17 @@ class ApiService {
       ValueNotifier<String?>(null);
 
   static bool _initialized = false;
+
+  static String _normalizeSupabaseUrl(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return '';
+    final parsed = Uri.tryParse(trimmed);
+    if (parsed == null || parsed.scheme.isEmpty || parsed.host.isEmpty) {
+      return trimmed.replaceAll(RegExp(r'/+$'), '');
+    }
+    final portPart = parsed.hasPort ? ':${parsed.port}' : '';
+    return '${parsed.scheme}://${parsed.host}$portPart';
+  }
 
   bool get isBackendConfigured =>
       supabaseUrl.isNotEmpty && supabaseKey.isNotEmpty && _initialized;
@@ -43,19 +56,28 @@ class ApiService {
   }
 
   static Future<void> initSupabase() async {
-    if (supabaseUrl.isEmpty || supabaseKey.isEmpty || _initialized) return;
+    final cleanUrl = supabaseUrl;
+    if (cleanUrl.isEmpty || supabaseKey.isEmpty || _initialized) return;
     try {
       await Supabase.initialize(
-        url: supabaseUrl,
+        url: cleanUrl,
         publishableKey: supabaseKey,
-      ).timeout(const Duration(seconds: 4));
+      ).timeout(const Duration(seconds: 5));
       _initialized = true;
       backendReadyNotifier.value = true;
     } catch (e) {
       _initialized = false;
       backendReadyNotifier.value = false;
-      lastErrorNotifier.value = 'Ошибка подключения: $e';
+      lastErrorNotifier.value = 'Ошибка подключения: ${_shortError(e)}';
     }
+  }
+
+  static String _shortError(Object e) {
+    if (e is PostgrestException) return e.message;
+    if (e is StorageException) return e.message;
+    if (e is AuthException) return e.message;
+    final text = e.toString();
+    return text.length > 90 ? '${text.substring(0, 90)}...' : text;
   }
 
   Future<String?> signInWithEmail(String email, String password) async {
@@ -112,15 +134,17 @@ class ApiService {
 
   Future<String?> uploadPhotoBytes(Uint8List bytes, String ext) async {
     if (!isBackendConfigured) return null;
-    final cleanExt = ext.isEmpty ? 'jpg' : ext;
+    final rawExt = ext.trim().toLowerCase();
+    final fileExt = rawExt.isEmpty ? 'jpg' : rawExt;
+    final mimeSubtype = fileExt == 'jpg' ? 'jpeg' : fileExt;
     final owner = currentUserId ?? 'anon';
-    final path =
-        '$owner/${DateTime.now().millisecondsSinceEpoch}.$cleanExt';
+    final path = '$owner/${DateTime.now().millisecondsSinceEpoch}.$fileExt';
+
     await Supabase.instance.client.storage.from('spot-photos').uploadBinary(
           path,
           bytes,
           fileOptions: FileOptions(
-            contentType: 'image/$cleanExt',
+            contentType: 'image/$mimeSubtype',
             upsert: true,
           ),
         );
@@ -158,13 +182,15 @@ class ApiService {
             )
             .toList();
 
-        lastErrorNotifier.value = null;
+        if (pendingLocal.isEmpty) {
+          lastErrorNotifier.value = null;
+        }
         final merged = [...pendingLocal, ...remoteSpots];
         await _saveToCache(merged);
         _updatePendingCounter(merged);
         return merged;
       } catch (e) {
-        lastErrorNotifier.value = 'Офлайн-режим (нет связи с облаком)';
+        lastErrorNotifier.value = 'Ошибка загрузки точек: ${_shortError(e)}';
       }
     }
 
@@ -235,7 +261,7 @@ class ApiService {
         _updatePendingCounter(current);
         return inserted;
       } catch (e) {
-        lastErrorNotifier.value = 'Сохранено на телефон (ждёт сети)';
+        lastErrorNotifier.value = 'Не отправлено: ${_shortError(e)}';
       }
     }
 
@@ -302,7 +328,7 @@ class ApiService {
             .copyWith(isSynced: true);
         lastErrorNotifier.value = null;
       } catch (e) {
-        lastErrorNotifier.value = 'Изменено локально (ошибка сети)';
+        lastErrorNotifier.value = 'Ошибка обновления: ${_shortError(e)}';
       }
     }
 
@@ -327,7 +353,9 @@ class ApiService {
             .from('fishing_spots')
             .delete()
             .eq('id', spot.id);
-      } catch (_) {}
+      } catch (e) {
+        lastErrorNotifier.value = 'Ошибка удаления: ${_shortError(e)}';
+      }
     }
 
     final current = await _loadFromCache();
@@ -363,8 +391,9 @@ class ApiService {
           current[idx] = uploaded;
         }
         syncedCount++;
-      } catch (_) {
-        // Оставляем в очереди до следующей попытки
+        lastErrorNotifier.value = null;
+      } catch (e) {
+        lastErrorNotifier.value = 'Синхронизация: ${_shortError(e)}';
       }
     }
 
@@ -446,7 +475,7 @@ class ApiService {
       });
       return null;
     } catch (e) {
-      return 'Не удалось отправить сообщение: $e';
+      return _shortError(e);
     }
   }
 
