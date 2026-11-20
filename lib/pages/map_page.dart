@@ -971,9 +971,9 @@ class _MapPageState extends State<MapPage> {
                 }).toList(),
               ),
               if (_loadedTrack != null && _loadedTrack!.points.length >= 2)
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
+                PolylineLayer<Object>(
+                  polylines: <Polyline<Object>>[
+                    Polyline<Object>(
                       points: _loadedTrack!.points,
                       color: Colors.deepPurpleAccent,
                       strokeWidth: 4,
@@ -981,9 +981,9 @@ class _MapPageState extends State<MapPage> {
                   ],
                 ),
               if (_trackPoints.length >= 2)
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
+                PolylineLayer<Object>(
+                  polylines: <Polyline<Object>>[
+                    Polyline<Object>(
                       points: _trackPoints,
                       color: Colors.redAccent,
                       strokeWidth: 4,
@@ -991,9 +991,9 @@ class _MapPageState extends State<MapPage> {
                   ],
                 ),
               if (_navTargetPoint != null)
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
+                PolylineLayer<Object>(
+                  polylines: <Polyline<Object>>[
+                    Polyline<Object>(
                       points: [navOrigin, _navTargetPoint!],
                       color: Colors.amber.shade800,
                       strokeWidth: 3.5,
@@ -1002,5 +1002,432 @@ class _MapPageState extends State<MapPage> {
                   ],
                 ),
               if (_rulerPoints.length >= 2)
-                PolylineLayer(
-                  polylines: [
+                PolylineLayer<Object>(
+                  polylines: <Polyline<Object>>[
+                    Polyline<Object>(
+                      points: _rulerPoints,
+                      color: Colors.cyan.shade700,
+                      strokeWidth: 3.5,
+                    ),
+                  ],
+                ),
+              MarkerLayer(
+                markers: [
+                  if (_myPosition != null)
+                    Marker(
+                      point: _myPosition!,
+                      width: 36,
+                      height: 36,
+                      child: _myHeadingDeg != null
+                          ? Transform.rotate(
+                              angle: _myHeadingDeg! * math.pi / 180,
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.blue,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 2.5,
+                                  ),
+                                ),
+                                child: const Icon(
+                                  Icons.navigation,
+                                  color: Colors.white,
+                                  size: 20,
+                                ),
+                              ),
+                            )
+                          : Container(
+                              decoration: BoxDecoration(
+                                color: Colors.blue,
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: Colors.white,
+                                  width: 3,
+                                ),
+                              ),
+                            ),
+                    ),
+                  if (_navTargetPoint != null)
+                    Marker(
+                      point: _navTargetPoint!,
+                      width: 34,
+                      height: 34,
+                      child: const Icon(
+                        Icons.flag_circle,
+                        color: Colors.amber,
+                        size: 32,
+                      ),
+                    ),
+                  ..._rulerPoints.map(
+                    (p) => Marker(
+                      point: p,
+                      width: 14,
+                      height: 14,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.cyan.shade700,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                      ),
+                    ),
+                  ),
+                  ...filteredSpots.map((spot) {
+                    final pt = spot.displayPointFor(myId);
+                    final color = _depthColor(spot.depthMeters);
+                    return Marker(
+                      point: pt,
+                      width: 58,
+                      height: 44,
+                      child: GestureDetector(
+                        onTap: () => _showSpotDetails(spot),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: color,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                '${spot.depthMeters.toStringAsFixed(1)}м',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            Icon(
+                              spot.isPrivateCircle
+                                  ? Icons.shield
+                                  : Icons.location_on,
+                              color: spot.isPrivateCircle ? Colors.orange : color,
+                              size: 22,
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }),
+                ],
+              ),
+              const Scalebar(
+                alignment: Alignment.topRight,
+                padding: EdgeInsets.fromLTRB(0, 12, 12, 0),
+              ),
+            ],
+          ),
+          if (_isLoading)
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: LinearProgressIndicator(),
+            ),
+          if (_navTargetPoint != null &&
+              navDistanceMeters != null &&
+              navBearingDeg != null)
+            Positioned(
+              top: 12,
+              left: 12,
+              right: 96,
+              child: Card(
+                color: Colors.black.withValues(alpha: 0.82),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  child: Row(
+                    children: [
+                      Transform.rotate(
+                        angle: navBearingDeg * math.pi / 180,
+                        child: const Icon(
+                          Icons.navigation,
+                          color: Colors.amber,
+                          size: 24,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _navTargetLabel ?? 'Цель',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              '${formatDistance(navDistanceMeters)} • '
+                              '${navBearingDeg.round()}° (${_compassDirection(navBearingDeg)})',
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.close, color: Colors.white70),
+                        onPressed: _clearNavTarget,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          if (_isRulerMode)
+            Positioned(
+              top: _navTargetPoint != null ? 82 : 12,
+              left: 12,
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.straighten, size: 18),
+                      const SizedBox(width: 8),
+                      Text(
+                        _rulerPoints.length < 2
+                            ? 'Тапайте по карте для замера'
+                            : 'Замер: ${formatDistance(_rulerTotalMeters)} (${_rulerPoints.length} т.)',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      if (_rulerPoints.isNotEmpty) ...[
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          tooltip: 'Отменить точку',
+                          icon: const Icon(Icons.undo, size: 18),
+                          onPressed: () =>
+                              setState(() => _rulerPoints.removeLast()),
+                        ),
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          tooltip: 'Сбросить',
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          onPressed: () => setState(() => _rulerPoints.clear()),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          Positioned(
+            left: 12,
+            bottom: 20,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    FilterChip(
+                      label: const Text('Глубины', style: TextStyle(fontSize: 12)),
+                      selected: _settings.showDepthZones,
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (v) => _updateSettings(
+                        _settings.copyWith(showDepthZones: v),
+                      ),
+                    ),
+                    FilterChip(
+                      label: const Text('Тепловая', style: TextStyle(fontSize: 12)),
+                      selected: _settings.showHeatmap,
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (v) => _updateSettings(
+                        _settings.copyWith(showHeatmap: v),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                if (_settings.showDepthZones)
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _legendDot(Colors.teal, '<3м'),
+                          const SizedBox(width: 8),
+                          _legendDot(Colors.blue, '3–7м'),
+                          const SizedBox(width: 8),
+                          _legendDot(Colors.indigo, '7–12м'),
+                          const SizedBox(width: 8),
+                          _legendDot(Colors.deepPurple, '>12м'),
+                        ],
+                      ),
+                    ),
+                  ),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_isTracking) ...[
+                          Text(
+                            'Трек: ${formatDistance(_trackDistanceMeters)} • '
+                            '${_speedKmh.toStringAsFixed(1)} км/ч',
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                          if (_trackPoints.isNotEmpty)
+                            TextButton.icon(
+                              style: TextButton.styleFrom(
+                                padding: EdgeInsets.zero,
+                                minimumSize: const Size(0, 28),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              icon: const Icon(Icons.home, size: 16),
+                              label: const Text('К старту (на берег)'),
+                              onPressed: () => _setNavTarget(
+                                _trackPoints.first,
+                                'Старт трека (берег)',
+                              ),
+                            ),
+                        ] else
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'Долгое нажатие — точка или курс',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                              const SizedBox(width: 6),
+                              InkWell(
+                                onTap: _loadSpots,
+                                child: const Icon(Icons.refresh, size: 17),
+                              ),
+                            ],
+                          ),
+                        if (_pendingSyncCount > 0)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: InkWell(
+                              onTap: _loadSpots,
+                              child: Text(
+                                'Ожидают отправки: $_pendingSyncCount т. (нажмите для повтора)',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .labelSmall
+                                    ?.copyWith(color: Colors.orange[800]),
+                              ),
+                            ),
+                          ),
+                        if (_syncStatusNote != null)
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 250),
+                            child: Text(
+                              _syncStatusNote!,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelSmall
+                                  ?.copyWith(color: Colors.red[700]),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_mapRotationDeg.abs() > 2.0) ...[
+            FloatingActionButton.small(
+              heroTag: 'compass',
+              tooltip: 'Север вверх',
+              onPressed: () {
+                _mapController.rotate(0);
+                setState(() => _mapRotationDeg = 0.0);
+              },
+              child: const Icon(Icons.explore),
+            ),
+            const SizedBox(height: 10),
+          ],
+          FloatingActionButton.small(
+            heroTag: 'ruler',
+            tooltip: _isRulerMode ? 'Выключить линейку' : 'Линейка расстояний',
+            backgroundColor: _isRulerMode ? Colors.cyan : null,
+            foregroundColor: _isRulerMode ? Colors.white : null,
+            onPressed: () => setState(() => _isRulerMode = !_isRulerMode),
+            child: const Icon(Icons.straighten),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton.small(
+            heroTag: 'gps',
+            tooltip: 'Моё местоположение',
+            onPressed: _goToMyLocation,
+            child: const Icon(Icons.my_location),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton.small(
+            heroTag: 'track',
+            tooltip: _isTracking ? 'Остановить трек' : 'Записать трек лодки',
+            backgroundColor: _isTracking ? Colors.red : null,
+            foregroundColor: _isTracking ? Colors.white : null,
+            onPressed: _toggleTrackRecording,
+            child: Icon(_isTracking ? Icons.stop : Icons.route),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton(
+            heroTag: 'add',
+            tooltip: 'Добавить точку',
+            onPressed: () => _openCreateSpot(_myPosition ?? _currentCenter),
+            child: const Icon(Icons.add_location_alt),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _legendDot(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 9,
+          height: 9,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: const TextStyle(fontSize: 11)),
+      ],
+    );
+  }
+}
