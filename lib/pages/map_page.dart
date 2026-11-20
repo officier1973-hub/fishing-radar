@@ -638,6 +638,101 @@ class _MapPageState extends State<MapPage> {
     );
   }
 
+  /// Оценка «жара» точки для тепловой карты (0.20 – 1.0): свежесть + вес + плотность рядом
+  double _computeHeatScore(
+    FishingSpot spot,
+    List<FishingSpot> all,
+    String? myId,
+  ) {
+    final ageDays = DateTime.now().difference(spot.createdAt).inDays;
+    final freshness = ageDays <= 3
+        ? 0.50
+        : ageDays <= 7
+            ? 0.40
+            : ageDays <= 30
+                ? 0.25
+                : 0.12;
+
+    final weight = spot.fishWeightKg ?? 0.0;
+    final weightBonus = weight >= 3.0
+        ? 0.25
+        : weight >= 1.0
+            ? 0.15
+            : 0.05;
+
+    final pt = spot.displayPointFor(myId);
+    var neighbors = 0;
+    for (final other in all) {
+      if (other.id == spot.id) continue;
+      final otherPt = other.displayPointFor(myId);
+      if ((pt.latitude - otherPt.latitude).abs() > 0.005 ||
+          (pt.longitude - otherPt.longitude).abs() > 0.008) {
+        continue;
+      }
+      if (_distanceCalc.as(LengthUnit.Meter, pt, otherPt) <= 350) {
+        neighbors++;
+        if (neighbors >= 3) break;
+      }
+    }
+    final clusterBonus = neighbors * 0.12;
+
+    return (freshness + weightBonus + clusterBonus).clamp(0.20, 1.0);
+  }
+
+  /// Перепады глубин (свалы/бровки) между соседними точками в радиусе до 800 м
+  List<_DepthDropSegment> _computeDepthDrops(
+    List<FishingSpot> spots,
+    String? myId,
+  ) {
+    if (spots.length < 2) return const [];
+    final drops = <_DepthDropSegment>[];
+    final seenPairs = <String>{};
+
+    for (var i = 0; i < spots.length; i++) {
+      final a = spots[i];
+      final ptA = a.displayPointFor(myId);
+      int? bestJ;
+      var bestDist = double.infinity;
+
+      for (var j = 0; j < spots.length; j++) {
+        if (i == j) continue;
+        final b = spots[j];
+        if ((a.depthMeters - b.depthMeters).abs() < 1.5) continue;
+        final ptB = b.displayPointFor(myId);
+        if ((ptA.latitude - ptB.latitude).abs() > 0.01 ||
+            (ptA.longitude - ptB.longitude).abs() > 0.015) {
+          continue;
+        }
+        final dist = _distanceCalc.as(LengthUnit.Meter, ptA, ptB);
+        if (dist >= 35 && dist <= 800 && dist < bestDist) {
+          bestDist = dist;
+          bestJ = j;
+        }
+      }
+
+      if (bestJ != null) {
+        final low = i < bestJ ? i : bestJ;
+        final high = i < bestJ ? bestJ : i;
+        final key = '$low-$high';
+        if (seenPairs.add(key)) {
+          final b = spots[bestJ];
+          final ptB = b.displayPointFor(myId);
+          final shallowPt = a.depthMeters <= b.depthMeters ? ptA : ptB;
+          final deepPt = a.depthMeters <= b.depthMeters ? ptB : ptA;
+          drops.add(
+            _DepthDropSegment(
+              from: shallowPt,
+              to: deepPt,
+              dropMeters: (a.depthMeters - b.depthMeters).abs(),
+            ),
+          );
+          if (drops.length >= 30) break;
+        }
+      }
+    }
+    return drops;
+  }
+
   Color _depthColor(double depth) {
     if (depth < 3) return Colors.green.shade600;
     if (depth < 7) return Colors.blue.shade700;
@@ -678,6 +773,10 @@ class _MapPageState extends State<MapPage> {
       }
       return true;
     }).toList();
+
+    final depthDrops = _settings.showDepthZones
+        ? _computeDepthDrops(filteredSpots, myId)
+        : const <_DepthDropSegment>[];
 
     final baseUrl = _settings.baseMap == BaseMapType.satellite
         ? OfflineMapService.satelliteUrlTemplate
@@ -829,68 +928,95 @@ class _MapPageState extends State<MapPage> {
                   tileProvider: _tileProvider,
                   maxNativeZoom: 18,
                 ),
-              // Зоны глубин (всегда заметные экранные ореолы)
+              // 1) Мягкие пятна глубин (размер растёт с глубиной, без «мишеней»)
               if (_settings.showDepthZones && filteredSpots.isNotEmpty)
                 CircleLayer<Object>(
                   circles: <CircleMarker<Object>>[
                     ...filteredSpots.map((s) {
                       final pt = s.displayPointFor(myId);
                       final color = _depthColor(s.depthMeters);
+                      final r = 24.0 + s.depthMeters.clamp(1.0, 18.0) * 1.9;
                       return CircleMarker<Object>(
                         point: pt,
-                        radius: 46,
+                        radius: r,
                         useRadiusInMeter: false,
-                        color: color.withValues(alpha: 0.30),
-                        borderColor: color.withValues(alpha: 0.95),
-                        borderStrokeWidth: 2.5,
+                        color: color.withValues(alpha: 0.24),
+                        borderStrokeWidth: 0,
                       );
                     }),
                     ...filteredSpots.map((s) {
                       final pt = s.displayPointFor(myId);
                       final color = _depthColor(s.depthMeters);
+                      final r = 14.0 + s.depthMeters.clamp(1.0, 18.0) * 1.1;
                       return CircleMarker<Object>(
                         point: pt,
-                        radius: 28,
+                        radius: r,
                         useRadiusInMeter: false,
-                        color: color.withValues(alpha: 0.45),
-                        borderColor: Colors.white.withValues(alpha: 0.70),
-                        borderStrokeWidth: 1.2,
+                        color: color.withValues(alpha: 0.36),
+                        borderStrokeWidth: 0,
                       );
                     }),
                   ],
                 ),
-              // Тепловая карта клёва (контрастное свечение поверх точек)
+              // 2) Линии свалов/перепадов глубин между соседними точками
+              if (depthDrops.isNotEmpty)
+                PolylineLayer<Object>(
+                  polylines: depthDrops
+                      .map(
+                        (d) => Polyline<Object>(
+                          points: [d.from, d.to],
+                          color: Colors.indigo.shade900.withValues(alpha: 0.78),
+                          strokeWidth: 2.5,
+                          pattern: StrokePattern.dashed(segments: const [8, 6]),
+                        ),
+                      )
+                      .toList(),
+                ),
+              // 3) Тепловая карта (индивидуальный размер/цвет по силе и свежести клёва)
               if (_settings.showHeatmap && filteredSpots.isNotEmpty)
                 CircleLayer<Object>(
                   circles: <CircleMarker<Object>>[
-                    ...filteredSpots.map(
-                      (s) => CircleMarker<Object>(
-                        point: s.displayPointFor(myId),
-                        radius: 64,
-                        useRadiusInMeter: false,
-                        color: Colors.amber.withValues(alpha: 0.32),
-                        borderColor: Colors.orange.withValues(alpha: 0.65),
-                        borderStrokeWidth: 1.5,
-                      ),
-                    ),
-                    ...filteredSpots.map(
-                      (s) => CircleMarker<Object>(
-                        point: s.displayPointFor(myId),
-                        radius: 42,
-                        useRadiusInMeter: false,
-                        color: Colors.deepOrange.withValues(alpha: 0.48),
-                        borderStrokeWidth: 0,
-                      ),
-                    ),
-                    ...filteredSpots.map(
-                      (s) => CircleMarker<Object>(
-                        point: s.displayPointFor(myId),
-                        radius: 22,
-                        useRadiusInMeter: false,
-                        color: Colors.red.withValues(alpha: 0.72),
-                        borderStrokeWidth: 0,
-                      ),
-                    ),
+                    for (final s in filteredSpots) ...() {
+                      final score = _computeHeatScore(s, filteredSpots, myId);
+                      final pt = s.displayPointFor(myId);
+                      final outerR = 26.0 + score * 38.0;
+                      final list = <CircleMarker<Object>>[
+                        CircleMarker<Object>(
+                          point: pt,
+                          radius: outerR,
+                          useRadiusInMeter: false,
+                          color: Colors.amber.withValues(
+                            alpha: 0.20 + score * 0.20,
+                          ),
+                          borderStrokeWidth: 0,
+                        ),
+                      ];
+                      if (score >= 0.45) {
+                        list.add(
+                          CircleMarker<Object>(
+                            point: pt,
+                            radius: outerR * 0.64,
+                            useRadiusInMeter: false,
+                            color: Colors.deepOrange.withValues(
+                              alpha: 0.28 + score * 0.22,
+                            ),
+                            borderStrokeWidth: 0,
+                          ),
+                        );
+                      }
+                      if (score >= 0.72) {
+                        list.add(
+                          CircleMarker<Object>(
+                            point: pt,
+                            radius: outerR * 0.36,
+                            useRadiusInMeter: false,
+                            color: Colors.red.withValues(alpha: 0.62),
+                            borderStrokeWidth: 0,
+                          ),
+                        );
+                      }
+                      return list;
+                    }(),
                   ],
                 ),
               // Кольца расстояний
@@ -1000,6 +1126,34 @@ class _MapPageState extends State<MapPage> {
                 ),
               MarkerLayer(
                 markers: [
+                  // Подписи перепадов глубин (свалов)
+                  ...depthDrops.map(
+                    (d) => Marker(
+                      point: d.midpoint,
+                      width: 68,
+                      height: 22,
+                      child: Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 1,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.indigo.shade900.withValues(alpha: 0.85),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            '↘ ${d.dropMeters.toStringAsFixed(1)}м',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                   if (_myPosition != null)
                     Marker(
                       point: _myPosition!,
@@ -1256,7 +1410,7 @@ class _MapPageState extends State<MapPage> {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
                               content: Text(
-                                'Нет точек для отображения зон (проверьте фильтры)',
+                                'Нет точек для отображения глубин (проверьте фильтры)',
                               ),
                             ),
                           );
@@ -1310,13 +1464,32 @@ class _MapPageState extends State<MapPage> {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          _legendDot(Colors.green.shade600, '<3м'),
-                          const SizedBox(width: 8),
+                          _legendDot(Colors.green.shade600, '<3м мель'),
+                          const SizedBox(width: 7),
                           _legendDot(Colors.blue.shade700, '3–7м'),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 7),
                           _legendDot(Colors.indigo.shade800, '7–12м'),
-                          const SizedBox(width: 8),
-                          _legendDot(Colors.purple.shade800, '>12м'),
+                          const SizedBox(width: 7),
+                          _legendDot(Colors.purple.shade800, '>12м яма'),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (_settings.showHeatmap)
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _legendDot(Colors.amber, 'старый улов'),
+                          const SizedBox(width: 7),
+                          _legendDot(Colors.deepOrange, 'активно'),
+                          const SizedBox(width: 7),
+                          _legendDot(Colors.red, 'жор/трофей'),
                         ],
                       ),
                     ),
@@ -1470,4 +1643,21 @@ class _MapPageState extends State<MapPage> {
       ],
     );
   }
+}
+
+class _DepthDropSegment {
+  final LatLng from;
+  final LatLng to;
+  final double dropMeters;
+
+  const _DepthDropSegment({
+    required this.from,
+    required this.to,
+    required this.dropMeters,
+  });
+
+  LatLng get midpoint => LatLng(
+        (from.latitude + to.latitude) / 2.0,
+        (from.longitude + to.longitude) / 2.0,
+      );
 }
