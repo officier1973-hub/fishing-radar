@@ -338,3 +338,156 @@ Future<void> showOfflineCacheSheet({
                                       '(пропущено ${result.failed} — нажмите ещё раз для докачки).';
                                 } else {
                                   statusMessage =
+                                      'Готово! Сохранены все ${result.saved} из ${result.total} фрагментов.';
+                                }
+                              });
+                            } catch (e) {
+                              if (!ctx.mounted) return;
+                              setSheetState(() {
+                                statusMessage = 'Ошибка загрузки: $e';
+                              });
+                            } finally {
+                              if (ctx.mounted) {
+                                setSheetState(() => isDownloading = false);
+                              }
+                            }
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Очистить'),
+                        onPressed: isDownloading
+                            ? null
+                            : () async {
+                                await offlineService.clearCache();
+                                onCacheCleared?.call();
+                                if (!ctx.mounted) return;
+                                setSheetState(() {
+                                  cacheCheckTick++;
+                                  statusMessage = 'Кеш карт очищен.';
+                                });
+                              },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    },
+  );
+}
+
+Future<void> showSavedTracksSheet({
+  required BuildContext context,
+  required TrackService trackService,
+  required BoatTrack? activeLoadedTrack,
+  required ValueChanged<BoatTrack?> onSelectTrack,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (ctx) {
+      return StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Сохранённые треки лодки',
+                          style: Theme.of(ctx).textTheme.titleLarge,
+                        ),
+                      ),
+                      if (activeLoadedTrack != null)
+                        TextButton(
+                          onPressed: () {
+                            onSelectTrack(null);
+                            Navigator.of(ctx).pop();
+                          },
+                          child: const Text('Скрыть'),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  FutureBuilder<List<BoatTrack>>(
+                    future: trackService.loadTracks(),
+                    builder: (context, snapshot) {
+                      final tracks = snapshot.data ?? [];
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return const Padding(
+                          padding: EdgeInsets.all(24),
+                          child: CircularProgressIndicator(),
+                        );
+                      }
+                      if (tracks.isEmpty) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 28),
+                          child: Text(
+                            'Пока нет сохранённых треков.\n'
+                            'Нажмите кнопку маршрута справа, чтобы записать проход.',
+                            textAlign: TextAlign.center,
+                          ),
+                        );
+                      }
+                      return ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 340),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: tracks.length,
+                          separatorBuilder: (_, __) => const Divider(height: 1),
+                          itemBuilder: (_, index) {
+                            final track = tracks[index];
+                            final isSelected = activeLoadedTrack?.id == track.id;
+                            final date = DateFormat('dd.MM HH:mm')
+                                .format(track.startedAt);
+                            return ListTile(
+                              leading: Icon(
+                                Icons.route,
+                                color: isSelected
+                                    ? Theme.of(ctx).colorScheme.primary
+                                    : null,
+                              ),
+                              title: Text(track.name),
+                              subtitle: Text(
+                                '$date • ${formatDistance(track.distanceMeters)} • '
+                                '${formatDuration(track.duration)} • '
+                                'ср. ${track.avgSpeedKmh.toStringAsFixed(1)} км/ч',
+                              ),
+                              trailing: IconButton(
+                                icon: const Icon(Icons.delete_outline),
+                                onPressed: () async {
+                                  await trackService.deleteTrack(track.id);
+                                  if (isSelected) onSelectTrack(null);
+                                  setSheetState(() {});
+                                },
+                              ),
+                              onTap: () {
+                                onSelectTrack(track);
+                                Navigator.of(ctx).pop();
+                              },
+                            );
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    },
+  );
+}
