@@ -83,15 +83,19 @@ Future<void> showLayersSheet({
                   ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('Зоны глубин (по точкам)'),
-                    subtitle: const Text('Цветные ореолы глубин на водоёме'),
+                    title: const Text('Зоны глубин и перепады'),
+                    subtitle: const Text(
+                      'Цветные пятна глубин и линии свалов между соседними точками',
+                    ),
                     value: local.showDepthZones,
                     onChanged: (v) => update(local.copyWith(showDepthZones: v)),
                   ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Тепловая карта клёва'),
-                    subtitle: const Text('Подсвечивает горячие зоны уловов'),
+                    subtitle: const Text(
+                      'Размер и яркость зависят от свежести, веса и плотности уловов',
+                    ),
                     value: local.showHeatmap,
                     onChanged: (v) => update(local.copyWith(showHeatmap: v)),
                   ),
@@ -186,6 +190,7 @@ Future<void> showOfflineCacheSheet({
       var done = 0;
       var total = 0;
       var saved = 0;
+      var phaseLabel = 'Загрузка фрагментов';
       var cacheCheckTick = 0;
       String? statusMessage;
 
@@ -208,7 +213,7 @@ Future<void> showOfflineCacheSheet({
               capped ? OfflineMapService.maxTilesPerDownload : estimated;
 
           return SafeArea(
-            child: Padding(
+            child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -221,8 +226,7 @@ Future<void> showOfflineCacheSheet({
                   const SizedBox(height: 6),
                   const Text(
                     'Просмотренные участки сохраняются на 30 дней автоматически. '
-                    'Нажмите «Скачать область» перед выходом на воду. Проверить работу '
-                    'можно, включив «Режим полёта» на телефоне и полистав карту.',
+                    'Чтобы убедиться в работе офлайна, включите «Режим полёта» и подвигайте карту.',
                   ),
                   const SizedBox(height: 10),
                   FutureBuilder<(int, int)>(
@@ -239,16 +243,39 @@ Future<void> showOfflineCacheSheet({
                       }
                       final (cached, all) = snap.data!;
                       final pct = all > 0 ? ((cached / all) * 100).round() : 0;
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Chip(
-                          avatar: Icon(
-                            pct == 100 ? Icons.check_circle : Icons.sd_storage,
-                            size: 18,
-                          ),
-                          label: Text(
-                            'В памяти телефона для этого экрана: $cached из $all ($pct%)',
-                          ),
+                      return Container(
+                        width: double.infinity,
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Theme.of(ctx)
+                              .colorScheme
+                              .surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              pct == 100 ? Icons.check_circle : Icons.sd_storage,
+                              size: 20,
+                              color: pct == 100
+                                  ? Colors.green.shade700
+                                  : Theme.of(ctx).colorScheme.primary,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'В памяти телефона: $cached из $all фрагментов ($pct%)',
+                                style: Theme.of(ctx)
+                                    .textTheme
+                                    .bodyMedium
+                                    ?.copyWith(fontWeight: FontWeight.w600),
+                              ),
+                            ),
+                          ],
                         ),
                       );
                     },
@@ -256,7 +283,9 @@ Future<void> showOfflineCacheSheet({
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Высокая детализация (зум 12–15)'),
-                    subtitle: const Text('Выше точность берега, но больше фрагментов'),
+                    subtitle: const Text(
+                      'Выше точность берега, но больше фрагментов',
+                    ),
                     value: detailedZoom,
                     onChanged: isDownloading
                         ? null
@@ -264,7 +293,7 @@ Future<void> showOfflineCacheSheet({
                   ),
                   Text(
                     capped
-                        ? 'К загрузке: $plannedCount фрагментов (лимит за 1 раз — приблизьте карту для деталей)'
+                        ? 'К загрузке: $plannedCount фрагментов (лимит за 1 раз — приблизьте карту)'
                         : 'К загрузке: $plannedCount фрагментов (≈ ${(plannedCount * 0.025).toStringAsFixed(1)} МБ)',
                     style: Theme.of(ctx).textTheme.bodyMedium,
                   ),
@@ -274,13 +303,19 @@ Future<void> showOfflineCacheSheet({
                       value: total > 0 ? (done / total).clamp(0.0, 1.0) : 0.0,
                     ),
                     const SizedBox(height: 6),
-                    Text('Обработано: $done из $total • сохранено: $saved'),
+                    Text('$phaseLabel: $done из $total'),
+                    Text(
+                      'Всего сохранено в память: $saved из $plannedCount',
+                      style: Theme.of(ctx).textTheme.bodySmall,
+                    ),
                   ],
                   if (statusMessage != null) ...[
                     const SizedBox(height: 10),
                     Text(
                       statusMessage!,
-                      style: TextStyle(color: Theme.of(ctx).colorScheme.primary),
+                      style: TextStyle(
+                        color: Theme.of(ctx).colorScheme.primary,
+                      ),
                     ),
                   ],
                   const SizedBox(height: 16),
@@ -288,7 +323,9 @@ Future<void> showOfflineCacheSheet({
                     children: [
                       Expanded(
                         child: FilledButton.icon(
-                          icon: Icon(isDownloading ? Icons.close : Icons.download),
+                          icon: Icon(
+                            isDownloading ? Icons.close : Icons.download,
+                          ),
                           label: Text(
                             isDownloading ? 'Отменить' : 'Скачать область',
                           ),
@@ -303,22 +340,25 @@ Future<void> showOfflineCacheSheet({
                               done = 0;
                               total = plannedCount;
                               saved = 0;
+                              phaseLabel = 'Загрузка фрагментов';
                               statusMessage = null;
                             });
 
                             try {
-                              final result = await offlineService.downloadRegion(
+                              final result =
+                                  await offlineService.downloadRegion(
                                 urlTemplate: url,
                                 bounds: visibleBounds,
                                 minZoom: minZoom,
                                 maxZoom: maxZoom,
                                 isCancelled: () => isCancelled,
-                                onProgress: (d, t, s) {
+                                onProgress: (d, t, s, phase) {
                                   if (!ctx.mounted) return;
                                   setSheetState(() {
                                     done = d;
                                     total = t;
                                     saved = s;
+                                    phaseLabel = phase;
                                   });
                                 },
                               );
@@ -329,13 +369,16 @@ Future<void> showOfflineCacheSheet({
                                 if (isCancelled) {
                                   statusMessage =
                                       'Остановлено: сохранено ${result.saved} из ${result.total}.';
-                                } else if (result.saved == 0 && result.total > 0) {
+                                } else if (result.saved == 0 &&
+                                    result.total > 0) {
                                   statusMessage =
                                       'Не удалось скачать карту — проверьте интернет.';
                                 } else if (result.failed > 0) {
                                   statusMessage =
-                                      'Сохранено ${result.saved} из ${result.total} '
-                                      '(пропущено ${result.failed} — нажмите ещё раз для докачки).';
+                                      'Сохранено ${result.saved} из ${result.total}. '
+                                      'Пропущено ${result.failed} (таймаут сети: ${result.timeouts}, '
+                                      'ограничение/ошибка сервера: ${result.errors}). '
+                                      'Нажмите «Скачать область» ещё раз для докачки.';
                                 } else {
                                   statusMessage =
                                       'Готово! Сохранены все ${result.saved} из ${result.total} фрагментов.';
