@@ -35,6 +35,7 @@ class _MapPageState extends State<MapPage> {
   late TileProvider _tileProvider;
 
   LatLng _currentCenter = const LatLng(53.2001, 50.1500);
+  double _currentZoom = 13.0;
   LatLng? _myPosition;
   double? _myHeadingDeg;
   double _speedKmh = 0.0;
@@ -110,7 +111,18 @@ class _MapPageState extends State<MapPage> {
     if (!_isMapReady) return;
     try {
       _mapController.move(center, zoom);
+      _currentZoom = zoom;
     } catch (_) {}
+  }
+
+  double _zoneRadiusMeters(double baseMeters, double minPixels) {
+    final cosLat = math
+        .cos(_currentCenter.latitude * math.pi / 180.0)
+        .abs()
+        .clamp(0.1, 1.0);
+    final metersPerPixel =
+        156543.03392 * cosLat / math.pow(2.0, _currentZoom);
+    return math.max(baseMeters, minPixels * metersPerPixel);
   }
 
   Future<void> _initData() async {
@@ -415,7 +427,8 @@ class _MapPageState extends State<MapPage> {
         content: Text(
           saved.isSynced
               ? 'Точка сохранена и отправлена в облако'
-              : 'Точка сохранена на телефон (отправится при появлении сети)',
+              : (ApiService.lastErrorNotifier.value ??
+                  'Точка сохранена на телефон'),
         ),
       ),
     );
@@ -566,7 +579,7 @@ class _MapPageState extends State<MapPage> {
                   padding: EdgeInsets.only(top: 6),
                   child: Chip(
                     avatar: Icon(Icons.cloud_off, size: 18),
-                    label: Text('Ждёт интернета для отправки в облако'),
+                    label: Text('Ждёт отправки в облако'),
                   ),
                 ),
               if (spot.isPrivateCircle)
@@ -693,6 +706,12 @@ class _MapPageState extends State<MapPage> {
       navBearingDeg = ((rawBearing % 360) + 360) % 360;
     }
 
+    final outerDepthRadius = _zoneRadiusMeters(250, 48);
+    final innerDepthRadius = _zoneRadiusMeters(120, 28);
+    final heatOuterRadius = _zoneRadiusMeters(320, 68);
+    final heatMidRadius = _zoneRadiusMeters(180, 44);
+    final heatCoreRadius = _zoneRadiusMeters(90, 24);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('FishRadar'),
@@ -786,7 +805,7 @@ class _MapPageState extends State<MapPage> {
             mapController: _mapController,
             options: MapOptions(
               initialCenter: _currentCenter,
-              initialZoom: 13,
+              initialZoom: _currentZoom,
               onMapReady: () {
                 _isMapReady = true;
                 if (_myPosition != null) {
@@ -806,8 +825,12 @@ class _MapPageState extends State<MapPage> {
               onPositionChanged: (camera, _) {
                 _currentCenter = camera.center;
                 final rotDiff = (camera.rotation - _mapRotationDeg).abs();
-                if (rotDiff > 1.0) {
-                  setState(() => _mapRotationDeg = camera.rotation);
+                final zoomDiff = (camera.zoom - _currentZoom).abs();
+                if (rotDiff > 1.0 || zoomDiff > 0.15) {
+                  setState(() {
+                    _mapRotationDeg = camera.rotation;
+                    _currentZoom = camera.zoom;
+                  });
                 }
               },
             ),
@@ -825,7 +848,6 @@ class _MapPageState extends State<MapPage> {
                   tileProvider: _tileProvider,
                   maxNativeZoom: 18,
                 ),
-              // Зоны глубин (увеличенные и контрастные)
               if (_settings.showDepthZones && filteredSpots.isNotEmpty)
                 CircleLayer(
                   circles: [
@@ -834,11 +856,11 @@ class _MapPageState extends State<MapPage> {
                       final color = _depthColor(s.depthMeters);
                       return CircleMarker(
                         point: pt,
-                        radius: 220,
+                        radius: outerDepthRadius,
                         useRadiusInMeter: true,
-                        color: color.withValues(alpha: 0.16),
-                        borderColor: color.withValues(alpha: 0.35),
-                        borderStrokeWidth: 1.0,
+                        color: color.withValues(alpha: 0.22),
+                        borderColor: color.withValues(alpha: 0.60),
+                        borderStrokeWidth: 1.8,
                       );
                     }),
                     ...filteredSpots.map((s) {
@@ -846,48 +868,46 @@ class _MapPageState extends State<MapPage> {
                       final color = _depthColor(s.depthMeters);
                       return CircleMarker(
                         point: pt,
-                        radius: 100,
+                        radius: innerDepthRadius,
                         useRadiusInMeter: true,
-                        color: color.withValues(alpha: 0.28),
+                        color: color.withValues(alpha: 0.36),
                         borderStrokeWidth: 0,
                       );
                     }),
                   ],
                 ),
-              // Тепловая карта клёва (Heatmap)
               if (_settings.showHeatmap && filteredSpots.isNotEmpty)
                 CircleLayer(
                   circles: [
                     ...filteredSpots.map(
                       (s) => CircleMarker(
                         point: s.displayPointFor(myId),
-                        radius: 260,
+                        radius: heatOuterRadius,
                         useRadiusInMeter: true,
-                        color: Colors.amber.withValues(alpha: 0.14),
+                        color: Colors.amber.withValues(alpha: 0.22),
                         borderStrokeWidth: 0,
                       ),
                     ),
                     ...filteredSpots.map(
                       (s) => CircleMarker(
                         point: s.displayPointFor(myId),
-                        radius: 140,
+                        radius: heatMidRadius,
                         useRadiusInMeter: true,
-                        color: Colors.deepOrange.withValues(alpha: 0.22),
+                        color: Colors.deepOrange.withValues(alpha: 0.34),
                         borderStrokeWidth: 0,
                       ),
                     ),
                     ...filteredSpots.map(
                       (s) => CircleMarker(
                         point: s.displayPointFor(myId),
-                        radius: 65,
+                        radius: heatCoreRadius,
                         useRadiusInMeter: true,
-                        color: Colors.redAccent.withValues(alpha: 0.32),
+                        color: Colors.redAccent.withValues(alpha: 0.48),
                         borderStrokeWidth: 0,
                       ),
                     ),
                   ],
                 ),
-              // Кольца расстояний
               if (_settings.ringPreset.radii.isNotEmpty)
                 CircleLayer(
                   circles: _settings.ringPreset.radii
@@ -934,7 +954,6 @@ class _MapPageState extends State<MapPage> {
                     );
                   }).toList(),
                 ),
-              // Приватные зоны «Круг доверия» (радиус 250 м)
               CircleLayer(
                 circles: filteredSpots.where((s) => s.isPrivateCircle).map((s) {
                   final center = (s.publicLatitude != null &&
@@ -985,397 +1004,3 @@ class _MapPageState extends State<MapPage> {
               if (_rulerPoints.length >= 2)
                 PolylineLayer(
                   polylines: [
-                    Polyline(
-                      points: _rulerPoints,
-                      color: Colors.cyan.shade700,
-                      strokeWidth: 3.5,
-                    ),
-                  ],
-                ),
-              MarkerLayer(
-                markers: [
-                  if (_myPosition != null)
-                    Marker(
-                      point: _myPosition!,
-                      width: 36,
-                      height: 36,
-                      child: _myHeadingDeg != null
-                          ? Transform.rotate(
-                              angle: _myHeadingDeg! * math.pi / 180,
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  color: Colors.blue,
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: Colors.white,
-                                    width: 2.5,
-                                  ),
-                                ),
-                                child: const Icon(
-                                  Icons.navigation,
-                                  color: Colors.white,
-                                  size: 20,
-                                ),
-                              ),
-                            )
-                          : Container(
-                              decoration: BoxDecoration(
-                                color: Colors.blue,
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: Colors.white,
-                                  width: 3,
-                                ),
-                              ),
-                            ),
-                    ),
-                  if (_navTargetPoint != null)
-                    Marker(
-                      point: _navTargetPoint!,
-                      width: 34,
-                      height: 34,
-                      child: const Icon(
-                        Icons.flag_circle,
-                        color: Colors.amber,
-                        size: 32,
-                      ),
-                    ),
-                  ..._rulerPoints.map(
-                    (p) => Marker(
-                      point: p,
-                      width: 14,
-                      height: 14,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Colors.cyan.shade700,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 2),
-                        ),
-                      ),
-                    ),
-                  ),
-                  ...filteredSpots.map((spot) {
-                    final pt = spot.displayPointFor(myId);
-                    final color = _depthColor(spot.depthMeters);
-                    return Marker(
-                      point: pt,
-                      width: 58,
-                      height: 44,
-                      child: GestureDetector(
-                        onTap: () => _showSpotDetails(spot),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: color,
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Text(
-                                '${spot.depthMeters.toStringAsFixed(1)}м',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                            Icon(
-                              spot.isPrivateCircle
-                                  ? Icons.shield
-                                  : Icons.location_on,
-                              color: spot.isPrivateCircle ? Colors.orange : color,
-                              size: 22,
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  }),
-                ],
-              ),
-              const Scalebar(
-                alignment: Alignment.topRight,
-                padding: EdgeInsets.fromLTRB(0, 12, 12, 0),
-              ),
-            ],
-          ),
-          if (_isLoading)
-            const Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: LinearProgressIndicator(),
-            ),
-          if (_navTargetPoint != null &&
-              navDistanceMeters != null &&
-              navBearingDeg != null)
-            Positioned(
-              top: 12,
-              left: 12,
-              right: 96,
-              child: Card(
-                color: Colors.black.withValues(alpha: 0.82),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  child: Row(
-                    children: [
-                      Transform.rotate(
-                        angle: navBearingDeg * math.pi / 180,
-                        child: const Icon(
-                          Icons.navigation,
-                          color: Colors.amber,
-                          size: 24,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              _navTargetLabel ?? 'Цель',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            Text(
-                              '${formatDistance(navDistanceMeters)} • '
-                              '${navBearingDeg.round()}° (${_compassDirection(navBearingDeg)})',
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        visualDensity: VisualDensity.compact,
-                        icon: const Icon(Icons.close, color: Colors.white70),
-                        onPressed: _clearNavTarget,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          if (_isRulerMode)
-            Positioned(
-              top: _navTargetPoint != null ? 82 : 12,
-              left: 12,
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.straighten, size: 18),
-                      const SizedBox(width: 8),
-                      Text(
-                        _rulerPoints.length < 2
-                            ? 'Тапайте по карте для замера'
-                            : 'Замер: ${formatDistance(_rulerTotalMeters)} (${_rulerPoints.length} т.)',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                      if (_rulerPoints.isNotEmpty) ...[
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          tooltip: 'Отменить точку',
-                          icon: const Icon(Icons.undo, size: 18),
-                          onPressed: () =>
-                              setState(() => _rulerPoints.removeLast()),
-                        ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          tooltip: 'Сбросить',
-                          icon: const Icon(Icons.delete_outline, size: 18),
-                          onPressed: () => setState(() => _rulerPoints.clear()),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          Positioned(
-            left: 12,
-            bottom: 20,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_settings.showDepthZones)
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 5,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _legendDot(Colors.teal, '<3м'),
-                          const SizedBox(width: 8),
-                          _legendDot(Colors.blue, '3–7м'),
-                          const SizedBox(width: 8),
-                          _legendDot(Colors.indigo, '7–12м'),
-                          const SizedBox(width: 8),
-                          _legendDot(Colors.deepPurple, '>12м'),
-                        ],
-                      ),
-                    ),
-                  ),
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (_isTracking) ...[
-                          Text(
-                            'Трек: ${formatDistance(_trackDistanceMeters)} • '
-                            '${_speedKmh.toStringAsFixed(1)} км/ч',
-                            style: Theme.of(context)
-                                .textTheme
-                                .bodySmall
-                                ?.copyWith(fontWeight: FontWeight.w600),
-                          ),
-                          if (_trackPoints.isNotEmpty)
-                            TextButton.icon(
-                              style: TextButton.styleFrom(
-                                padding: EdgeInsets.zero,
-                                minimumSize: const Size(0, 28),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              ),
-                              icon: const Icon(Icons.home, size: 16),
-                              label: const Text('К старту (на берег)'),
-                              onPressed: () => _setNavTarget(
-                                _trackPoints.first,
-                                'Старт трека (берег)',
-                              ),
-                            ),
-                        ] else
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                'Долгое нажатие — точка или курс',
-                                style: Theme.of(context).textTheme.bodySmall,
-                              ),
-                              const SizedBox(width: 6),
-                              InkWell(
-                                onTap: _loadSpots,
-                                child: const Icon(Icons.refresh, size: 17),
-                              ),
-                            ],
-                          ),
-                        if (_pendingSyncCount > 0)
-                          Text(
-                            'В очереди отправки: $_pendingSyncCount т.',
-                            style: Theme.of(context)
-                                .textTheme
-                                .labelSmall
-                                ?.copyWith(color: Colors.orange[800]),
-                          )
-                        else if (_syncStatusNote != null)
-                          Text(
-                            _syncStatusNote!,
-                            style: Theme.of(context)
-                                .textTheme
-                                .labelSmall
-                                ?.copyWith(color: Colors.orange[800]),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (_mapRotationDeg.abs() > 2.0) ...[
-            FloatingActionButton.small(
-              heroTag: 'compass',
-              tooltip: 'Север вверх',
-              onPressed: () {
-                _mapController.rotate(0);
-                setState(() => _mapRotationDeg = 0.0);
-              },
-              child: const Icon(Icons.explore),
-            ),
-            const SizedBox(height: 10),
-          ],
-          FloatingActionButton.small(
-            heroTag: 'ruler',
-            tooltip: _isRulerMode ? 'Выключить линейку' : 'Линейка расстояний',
-            backgroundColor: _isRulerMode ? Colors.cyan : null,
-            foregroundColor: _isRulerMode ? Colors.white : null,
-            onPressed: () => setState(() => _isRulerMode = !_isRulerMode),
-            child: const Icon(Icons.straighten),
-          ),
-          const SizedBox(height: 10),
-          FloatingActionButton.small(
-            heroTag: 'gps',
-            tooltip: 'Моё местоположение',
-            onPressed: _goToMyLocation,
-            child: const Icon(Icons.my_location),
-          ),
-          const SizedBox(height: 10),
-          FloatingActionButton.small(
-            heroTag: 'track',
-            tooltip: _isTracking ? 'Остановить трек' : 'Записать трек лодки',
-            backgroundColor: _isTracking ? Colors.red : null,
-            foregroundColor: _isTracking ? Colors.white : null,
-            onPressed: _toggleTrackRecording,
-            child: Icon(_isTracking ? Icons.stop : Icons.route),
-          ),
-          const SizedBox(height: 10),
-          FloatingActionButton(
-            heroTag: 'add',
-            tooltip: 'Добавить точку',
-            onPressed: () => _openCreateSpot(_myPosition ?? _currentCenter),
-            child: const Icon(Icons.add_location_alt),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _legendDot(Color color, String label) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 9,
-          height: 9,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 4),
-        Text(label, style: const TextStyle(fontSize: 11)),
-      ],
-    );
-  }
-}
