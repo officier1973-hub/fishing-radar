@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/chat_message.dart';
 import '../services/api_service.dart';
 
@@ -10,9 +12,11 @@ class ChatPage extends StatefulWidget {
   State<ChatPage> createState() => _ChatPageState();
 }
 
-class _ChatPageState extends State<ChatPage> {
+class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   final ApiService _apiService = ApiService();
   final TextEditingController _msgController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  final FocusNode _inputFocusNode = FocusNode();
 
   static const _regions = [
     'Волга / Самара',
@@ -24,30 +28,124 @@ class _ChatPageState extends State<ChatPage> {
   ];
 
   String _selectedRegion = _regions.first;
+  final List<ChatMessage> _messages = [];
+  RealtimeChannel? _channel;
+  bool _isLoading = true;
   bool _sending = false;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _connectRegion(_selectedRegion);
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(_apiService.unsubscribeChannel(_channel));
     _msgController.dispose();
+    _scrollController.dispose();
+    _inputFocusNode.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      // После выключения/включения экрана сбрасываем зависшую отправку и переподключаем чат
+      if (_sending) {
+        setState(() => _sending = false);
+      }
+      _inputFocusNode.unfocus();
+      _connectRegion(_selectedRegion, keepExisting: true);
+    }
+  }
+
+  Future<void> _connectRegion(
+    String region, {
+    bool keepExisting = false,
+  }) async {
+    final oldChannel = _channel;
+    _channel = null;
+    unawaited(_apiService.unsubscribeChannel(oldChannel));
+
+    setState(() {
+      if (!keepExisting) {
+        _messages.clear();
+        _isLoading = true;
+      }
+    });
+
+    final loaded = await _apiService.fetchRegionMessages(region);
+    if (!mounted || region != _selectedRegion) return;
+
+    setState(() {
+      _messages.clear();
+      for (final m in loaded) {
+        _upsertMessage(m);
+      }
+      _isLoading = false;
+    });
+    _scrollToBottom();
+
+    _channel = _apiService.subscribeToRegionChat(region, (incoming) {
+      if (!mounted || region != _selectedRegion) return;
+      setState(() {
+        _upsertMessage(incoming);
+      });
+      _scrollToBottom();
+    });
+  }
+
+  void _upsertMessage(ChatMessage msg) {
+    final idx = _messages.indexWhere((m) => m.id == msg.id);
+    if (idx != -1) {
+      _messages[idx] = msg;
+    } else {
+      _messages.add(msg);
+      _messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
+    });
   }
 
   Future<void> _send() async {
     final text = _msgController.text.trim();
     if (text.isEmpty || _sending) return;
 
+    final region = _selectedRegion;
     setState(() => _sending = true);
-    final err = await _apiService.sendRegionMessage(_selectedRegion, text);
-    if (!mounted) return;
-    setState(() => _sending = false);
 
-    if (err != null) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
-      return;
-    }
-    _msgController.clear();
-    if (!_apiService.isBackendConfigured) {
-      setState(() {});
+    try {
+      final (sentMsg, err) = await _apiService.sendRegionMessage(region, text);
+      if (!mounted) return;
+
+      if (err != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(err)),
+        );
+        return;
+      }
+
+      _msgController.clear();
+      if (sentMsg != null && region == _selectedRegion) {
+        setState(() => _upsertMessage(sentMsg));
+        _scrollToBottom();
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sending = false);
+      }
     }
   }
 
@@ -58,6 +156,13 @@ class _ChatPageState extends State<ChatPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Чат водоёмов'),
+        actions: [
+          IconButton(
+            tooltip: 'Обновить чат',
+            icon: const Icon(Icons.refresh),
+            onPressed: () => _connectRegion(_selectedRegion, keepExisting: true),
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(50),
           child: SizedBox(
@@ -72,7 +177,11 @@ class _ChatPageState extends State<ChatPage> {
                 return ChoiceChip(
                   label: Text(region),
                   selected: _selectedRegion == region,
-                  onSelected: (_) => setState(() => _selectedRegion = region),
+                  onSelected: (_) {
+                    if (_selectedRegion == region) return;
+                    setState(() => _selectedRegion = region);
+                    _connectRegion(region);
+                  },
                 );
               },
             ),
@@ -92,72 +201,69 @@ class _ChatPageState extends State<ChatPage> {
               ),
             ),
           Expanded(
-            child: StreamBuilder<List<ChatMessage>>(
-              key: ValueKey(_selectedRegion),
-              stream: _apiService.watchRegionMessages(_selectedRegion),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting &&
-                    !snapshot.hasData) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                final messages = snapshot.data ?? [];
-                if (messages.isEmpty) {
-                  return Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Text(
-                        'В комнате «$_selectedRegion» пока пусто.\n'
-                        'Напишите, как обстановка на воде: уровень, прозрачность, клёв.',
-                        textAlign: TextAlign.center,
-                      ),
-                    ),
-                  );
-                }
-
-                return ListView.builder(
-                  padding: const EdgeInsets.all(12),
-                  itemCount: messages.length,
-                  itemBuilder: (_, index) {
-                    final m = messages[index];
-                    final isMine = myId != null && m.userId == myId;
-                    final timeStr = DateFormat('dd.MM HH:mm').format(m.createdAt);
-                    return Align(
-                      alignment:
-                          isMine ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Container(
-                        margin: const EdgeInsets.symmetric(vertical: 4),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 8,
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _messages.isEmpty
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text(
+                            'В комнате «$_selectedRegion» пока пусто.\n'
+                            'Напишите, как обстановка на воде: уровень, прозрачность, клёв.',
+                            textAlign: TextAlign.center,
+                          ),
                         ),
-                        constraints: BoxConstraints(
-                          maxWidth: MediaQuery.of(context).size.width * 0.78,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isMine
-                              ? Theme.of(context).colorScheme.primaryContainer
-                              : Theme.of(context)
-                                  .colorScheme
-                                  .surfaceContainerHighest,
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '${m.authorName} • $timeStr',
-                              style: Theme.of(context).textTheme.labelSmall,
+                      )
+                    : ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.all(12),
+                        itemCount: _messages.length,
+                        itemBuilder: (_, index) {
+                          final m = _messages[index];
+                          final isMine = myId != null && m.userId == myId;
+                          final timeStr =
+                              DateFormat('dd.MM HH:mm').format(m.createdAt);
+                          return Align(
+                            key: ValueKey(m.id),
+                            alignment: isMine
+                                ? Alignment.centerRight
+                                : Alignment.centerLeft,
+                            child: Container(
+                              margin: const EdgeInsets.symmetric(vertical: 4),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 8,
+                              ),
+                              constraints: BoxConstraints(
+                                maxWidth:
+                                    MediaQuery.of(context).size.width * 0.78,
+                              ),
+                              decoration: BoxDecoration(
+                                color: isMine
+                                    ? Theme.of(context)
+                                        .colorScheme
+                                        .primaryContainer
+                                    : Theme.of(context)
+                                        .colorScheme
+                                        .surfaceContainerHighest,
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '${m.authorName} • $timeStr',
+                                    style:
+                                        Theme.of(context).textTheme.labelSmall,
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(m.text),
+                                ],
+                              ),
                             ),
-                            const SizedBox(height: 3),
-                            Text(m.text),
-                          ],
-                        ),
+                          );
+                        },
                       ),
-                    );
-                  },
-                );
-              },
-            ),
           ),
           SafeArea(
             top: false,
@@ -167,6 +273,7 @@ class _ChatPageState extends State<ChatPage> {
                 children: [
                   Expanded(
                     child: TextField(
+                      focusNode: _inputFocusNode,
                       controller: _msgController,
                       textInputAction: TextInputAction.send,
                       onSubmitted: (_) => _send(),
@@ -180,7 +287,16 @@ class _ChatPageState extends State<ChatPage> {
                   const SizedBox(width: 8),
                   IconButton.filled(
                     onPressed: _sending ? null : _send,
-                    icon: const Icon(Icons.send),
+                    icon: _sending
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.send),
                   ),
                 ],
               ),
