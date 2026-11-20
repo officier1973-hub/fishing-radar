@@ -115,16 +115,6 @@ class _MapPageState extends State<MapPage> {
     } catch (_) {}
   }
 
-  double _zoneRadiusMeters(double baseMeters, double minPixels) {
-    final cosLat = math
-        .cos(_currentCenter.latitude * math.pi / 180.0)
-        .abs()
-        .clamp(0.1, 1.0);
-    final metersPerPixel =
-        156543.03392 * cosLat / math.pow(2.0, _currentZoom);
-    return math.max(baseMeters, minPixels * metersPerPixel);
-  }
-
   Future<void> _initData() async {
     try {
       final savedSettings = await _trackService.loadSettings();
@@ -649,10 +639,10 @@ class _MapPageState extends State<MapPage> {
   }
 
   Color _depthColor(double depth) {
-    if (depth < 3) return Colors.teal;
-    if (depth < 7) return Colors.blue;
-    if (depth < 12) return Colors.indigo;
-    return Colors.deepPurple;
+    if (depth < 3) return Colors.green.shade600;
+    if (depth < 7) return Colors.blue.shade700;
+    if (depth < 12) return Colors.indigo.shade800;
+    return Colors.purple.shade800;
   }
 
   String _compassDirection(double bearingDeg) {
@@ -705,12 +695,6 @@ class _MapPageState extends State<MapPage> {
       final rawBearing = _distanceCalc.bearing(navOrigin, _navTargetPoint!);
       navBearingDeg = ((rawBearing % 360) + 360) % 360;
     }
-
-    final outerDepthRadius = _zoneRadiusMeters(250, 48);
-    final innerDepthRadius = _zoneRadiusMeters(120, 28);
-    final heatOuterRadius = _zoneRadiusMeters(320, 68);
-    final heatMidRadius = _zoneRadiusMeters(180, 44);
-    final heatCoreRadius = _zoneRadiusMeters(90, 24);
 
     return Scaffold(
       appBar: AppBar(
@@ -824,13 +808,10 @@ class _MapPageState extends State<MapPage> {
               },
               onPositionChanged: (camera, _) {
                 _currentCenter = camera.center;
+                _currentZoom = camera.zoom;
                 final rotDiff = (camera.rotation - _mapRotationDeg).abs();
-                final zoomDiff = (camera.zoom - _currentZoom).abs();
-                if (rotDiff > 1.0 || zoomDiff > 0.15) {
-                  setState(() {
-                    _mapRotationDeg = camera.rotation;
-                    _currentZoom = camera.zoom;
-                  });
+                if (rotDiff > 1.0) {
+                  setState(() => _mapRotationDeg = camera.rotation);
                 }
               },
             ),
@@ -848,71 +829,76 @@ class _MapPageState extends State<MapPage> {
                   tileProvider: _tileProvider,
                   maxNativeZoom: 18,
                 ),
+              // Зоны глубин (всегда заметные экранные ореолы)
               if (_settings.showDepthZones && filteredSpots.isNotEmpty)
-                CircleLayer(
-                  circles: [
+                CircleLayer<Object>(
+                  circles: <CircleMarker<Object>>[
                     ...filteredSpots.map((s) {
                       final pt = s.displayPointFor(myId);
                       final color = _depthColor(s.depthMeters);
-                      return CircleMarker(
+                      return CircleMarker<Object>(
                         point: pt,
-                        radius: outerDepthRadius,
-                        useRadiusInMeter: true,
-                        color: color.withValues(alpha: 0.22),
-                        borderColor: color.withValues(alpha: 0.60),
-                        borderStrokeWidth: 1.8,
+                        radius: 46,
+                        useRadiusInMeter: false,
+                        color: color.withValues(alpha: 0.30),
+                        borderColor: color.withValues(alpha: 0.95),
+                        borderStrokeWidth: 2.5,
                       );
                     }),
                     ...filteredSpots.map((s) {
                       final pt = s.displayPointFor(myId);
                       final color = _depthColor(s.depthMeters);
-                      return CircleMarker(
+                      return CircleMarker<Object>(
                         point: pt,
-                        radius: innerDepthRadius,
-                        useRadiusInMeter: true,
-                        color: color.withValues(alpha: 0.36),
-                        borderStrokeWidth: 0,
+                        radius: 28,
+                        useRadiusInMeter: false,
+                        color: color.withValues(alpha: 0.45),
+                        borderColor: Colors.white.withValues(alpha: 0.70),
+                        borderStrokeWidth: 1.2,
                       );
                     }),
                   ],
                 ),
+              // Тепловая карта клёва (контрастное свечение поверх точек)
               if (_settings.showHeatmap && filteredSpots.isNotEmpty)
-                CircleLayer(
-                  circles: [
+                CircleLayer<Object>(
+                  circles: <CircleMarker<Object>>[
                     ...filteredSpots.map(
-                      (s) => CircleMarker(
+                      (s) => CircleMarker<Object>(
                         point: s.displayPointFor(myId),
-                        radius: heatOuterRadius,
-                        useRadiusInMeter: true,
-                        color: Colors.amber.withValues(alpha: 0.22),
+                        radius: 64,
+                        useRadiusInMeter: false,
+                        color: Colors.amber.withValues(alpha: 0.32),
+                        borderColor: Colors.orange.withValues(alpha: 0.65),
+                        borderStrokeWidth: 1.5,
+                      ),
+                    ),
+                    ...filteredSpots.map(
+                      (s) => CircleMarker<Object>(
+                        point: s.displayPointFor(myId),
+                        radius: 42,
+                        useRadiusInMeter: false,
+                        color: Colors.deepOrange.withValues(alpha: 0.48),
                         borderStrokeWidth: 0,
                       ),
                     ),
                     ...filteredSpots.map(
-                      (s) => CircleMarker(
+                      (s) => CircleMarker<Object>(
                         point: s.displayPointFor(myId),
-                        radius: heatMidRadius,
-                        useRadiusInMeter: true,
-                        color: Colors.deepOrange.withValues(alpha: 0.34),
-                        borderStrokeWidth: 0,
-                      ),
-                    ),
-                    ...filteredSpots.map(
-                      (s) => CircleMarker(
-                        point: s.displayPointFor(myId),
-                        radius: heatCoreRadius,
-                        useRadiusInMeter: true,
-                        color: Colors.redAccent.withValues(alpha: 0.48),
+                        radius: 22,
+                        useRadiusInMeter: false,
+                        color: Colors.red.withValues(alpha: 0.72),
                         borderStrokeWidth: 0,
                       ),
                     ),
                   ],
                 ),
+              // Кольца расстояний
               if (_settings.ringPreset.radii.isNotEmpty)
-                CircleLayer(
+                CircleLayer<Object>(
                   circles: _settings.ringPreset.radii
                       .map(
-                        (r) => CircleMarker(
+                        (r) => CircleMarker<Object>(
                           point: ringCenter,
                           radius: r,
                           useRadiusInMeter: true,
@@ -954,13 +940,14 @@ class _MapPageState extends State<MapPage> {
                     );
                   }).toList(),
                 ),
-              CircleLayer(
+              // Приватные зоны «Круг доверия» (радиус 250 м)
+              CircleLayer<Object>(
                 circles: filteredSpots.where((s) => s.isPrivateCircle).map((s) {
                   final center = (s.publicLatitude != null &&
                           s.publicLongitude != null)
                       ? LatLng(s.publicLatitude!, s.publicLongitude!)
                       : s.displayPointFor(myId);
-                  return CircleMarker(
+                  return CircleMarker<Object>(
                     point: center,
                     radius: 250,
                     useRadiusInMeter: true,
@@ -1242,20 +1229,73 @@ class _MapPageState extends State<MapPage> {
                   spacing: 6,
                   children: [
                     FilterChip(
-                      label: const Text('Глубины', style: TextStyle(fontSize: 12)),
-                      selected: _settings.showDepthZones,
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (v) => _updateSettings(
-                        _settings.copyWith(showDepthZones: v),
+                      avatar: Icon(
+                        Icons.water,
+                        size: 16,
+                        color: _settings.showDepthZones
+                            ? Colors.white
+                            : Colors.teal,
                       ),
+                      label: Text(
+                        'Глубины',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color:
+                              _settings.showDepthZones ? Colors.white : null,
+                        ),
+                      ),
+                      selected: _settings.showDepthZones,
+                      selectedColor: Colors.teal.shade700,
+                      checkmarkColor: Colors.white,
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (v) {
+                        _updateSettings(
+                          _settings.copyWith(showDepthZones: v),
+                        );
+                        if (v && filteredSpots.isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Нет точек для отображения зон (проверьте фильтры)',
+                              ),
+                            ),
+                          );
+                        }
+                      },
                     ),
                     FilterChip(
-                      label: const Text('Тепловая', style: TextStyle(fontSize: 12)),
-                      selected: _settings.showHeatmap,
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (v) => _updateSettings(
-                        _settings.copyWith(showHeatmap: v),
+                      avatar: Icon(
+                        Icons.local_fire_department,
+                        size: 16,
+                        color: _settings.showHeatmap
+                            ? Colors.white
+                            : Colors.deepOrange,
                       ),
+                      label: Text(
+                        'Тепловая',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: _settings.showHeatmap ? Colors.white : null,
+                        ),
+                      ),
+                      selected: _settings.showHeatmap,
+                      selectedColor: Colors.deepOrange.shade700,
+                      checkmarkColor: Colors.white,
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (v) {
+                        _updateSettings(
+                          _settings.copyWith(showHeatmap: v),
+                        );
+                        if (v && filteredSpots.isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Нет точек для тепловой карты (проверьте фильтры)',
+                              ),
+                            ),
+                          );
+                        }
+                      },
                     ),
                   ],
                 ),
@@ -1270,13 +1310,13 @@ class _MapPageState extends State<MapPage> {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          _legendDot(Colors.teal, '<3м'),
+                          _legendDot(Colors.green.shade600, '<3м'),
                           const SizedBox(width: 8),
-                          _legendDot(Colors.blue, '3–7м'),
+                          _legendDot(Colors.blue.shade700, '3–7м'),
                           const SizedBox(width: 8),
-                          _legendDot(Colors.indigo, '7–12м'),
+                          _legendDot(Colors.indigo.shade800, '7–12м'),
                           const SizedBox(width: 8),
-                          _legendDot(Colors.deepPurple, '>12м'),
+                          _legendDot(Colors.purple.shade800, '>12м'),
                         ],
                       ),
                     ),
