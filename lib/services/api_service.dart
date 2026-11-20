@@ -429,53 +429,102 @@ class ApiService {
         .copyWith(isSynced: true);
   }
 
-  Stream<List<ChatMessage>> watchRegionMessages(String region) {
+  Future<List<ChatMessage>> fetchRegionMessages(String region) async {
     if (!isBackendConfigured) {
-      return Stream.fromFuture(_loadLocalChat(region));
+      return _loadLocalChat(region);
     }
-    return Supabase.instance.client
-        .from('region_messages')
-        .stream(primaryKey: ['id'])
-        .eq('region', region)
-        .order('created_at', ascending: true)
-        .limit(100)
-        .map(
-          (rows) => rows
-              .map((e) => ChatMessage.fromJson(Map<String, dynamic>.from(e)))
-              .toList(),
-        );
+    try {
+      final rows = await Supabase.instance.client
+          .from('region_messages')
+          .select()
+          .eq('region', region)
+          .order('created_at', ascending: true)
+          .limit(100)
+          .timeout(const Duration(seconds: 8));
+      final list = rows as List<dynamic>;
+      return list
+          .map((e) => ChatMessage.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList();
+    } catch (_) {
+      return _loadLocalChat(region);
+    }
   }
 
-  Future<String?> sendRegionMessage(String region, String text) async {
+  RealtimeChannel? subscribeToRegionChat(
+    String region,
+    void Function(ChatMessage message) onMessage,
+  ) {
+    if (!isBackendConfigured) return null;
+    final channelName =
+        'region_chat_${region.hashCode}_${DateTime.now().millisecondsSinceEpoch}';
+    return Supabase.instance.client
+        .channel(channelName)
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'region_messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'region',
+            value: region,
+          ),
+          callback: (payload) {
+            if (payload.newRecord.isEmpty) return;
+            onMessage(
+              ChatMessage.fromJson(
+                Map<String, dynamic>.from(payload.newRecord),
+              ),
+            );
+          },
+        )
+        .subscribe();
+  }
+
+  Future<void> unsubscribeChannel(RealtimeChannel? channel) async {
+    if (channel == null || !isBackendConfigured) return;
+    try {
+      await Supabase.instance.client.removeChannel(channel);
+    } catch (_) {}
+  }
+
+  Future<(ChatMessage?, String?)> sendRegionMessage(
+    String region,
+    String text,
+  ) async {
     final clean = text.trim();
-    if (clean.isEmpty) return null;
+    if (clean.isEmpty) return (null, null);
 
     if (!isBackendConfigured) {
       final list = await _loadLocalChat(region);
-      list.add(
-        ChatMessage(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          region: region,
-          userId: currentUserId,
-          authorName: currentAuthorName,
-          text: clean,
-          createdAt: DateTime.now(),
-        ),
+      final msg = ChatMessage(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        region: region,
+        userId: currentUserId,
+        authorName: currentAuthorName,
+        text: clean,
+        createdAt: DateTime.now(),
       );
+      list.add(msg);
       await _saveLocalChat(region, list);
-      return null;
+      return (msg, null);
     }
 
     try {
-      await Supabase.instance.client.from('region_messages').insert({
-        'region': region,
-        'user_id': currentUserId,
-        'author_name': currentAuthorName,
-        'message_text': clean,
-      });
-      return null;
+      final row = await Supabase.instance.client
+          .from('region_messages')
+          .insert({
+            'region': region,
+            'user_id': currentUserId,
+            'author_name': currentAuthorName,
+            'message_text': clean,
+          })
+          .select()
+          .single()
+          .timeout(const Duration(seconds: 8));
+      final msg = ChatMessage.fromJson(Map<String, dynamic>.from(row));
+      return (msg, null);
     } catch (e) {
-      return _shortError(e);
+      return (null, _shortError(e));
     }
   }
 
