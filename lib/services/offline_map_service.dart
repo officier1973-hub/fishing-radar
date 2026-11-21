@@ -1,30 +1,37 @@
-import 'dart:async';
-import 'dart:math' as math;
-import 'package:flutter/painting.dart';
+import 'dart:io';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_map_mbtiles/flutter_map_mbtiles.dart';
+import 'package:mbtiles/mbtiles.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'api_service.dart';
 
-class TileDownloadResult {
-  final int processed;
-  final int total;
-  final int saved;
-  final int failed;
-  final int timeouts;
-  final int errors;
+class LocalMbtilesInfo {
+  final String path;
+  final String fileName;
+  final int sizeBytes;
 
-  const TileDownloadResult({
-    required this.processed,
-    required this.total,
-    required this.saved,
-    required this.failed,
-    required this.timeouts,
-    required this.errors,
+  const LocalMbtilesInfo({
+    required this.path,
+    required this.fileName,
+    required this.sizeBytes,
   });
 }
 
-enum _TileFetchStatus { ok, timeout, error }
+class CloudMbtilesInfo {
+  final String name;
+  final int sizeBytes;
+  final String downloadUrl;
+
+  const CloudMbtilesInfo({
+    required this.name,
+    required this.sizeBytes,
+    required this.downloadUrl,
+  });
+}
 
 class OfflineMapService {
-  static const int maxTilesPerDownload = 250;
   static const String standardUrlTemplate =
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
   static const String satelliteUrlTemplate =
@@ -37,252 +44,18 @@ class OfflineMapService {
     overrideFreshAge: const Duration(days: 30),
   );
 
-  NetworkTileProvider createTileProvider({bool silenceExceptions = true}) {
+  NetworkTileProvider createTileProvider() {
     return NetworkTileProvider(
       cachingProvider: _cachingProvider,
-      silenceExceptions: silenceExceptions,
+      silenceExceptions: true,
       headers: <String, String>{
-        'User-Agent': 'FishingRadar/0.2.0 (ru.fishingradar.app)',
+        'User-Agent': 'FishingRadar/0.3.0 (ru.fishingradar.app)',
       },
     );
   }
 
-  List<TileCoordinates> buildTilesForBounds({
-    required LatLngBounds bounds,
-    required int minZoom,
-    required int maxZoom,
-  }) {
-    final result = <TileCoordinates>[];
-    final zMin = minZoom.clamp(1, 18);
-    final zMax = maxZoom.clamp(zMin, 18);
-
-    for (var z = zMin; z <= zMax; z++) {
-      final minX = _lonToTileX(bounds.west, z);
-      final maxX = _lonToTileX(bounds.east, z);
-      final minY = _latToTileY(bounds.north, z);
-      final maxY = _latToTileY(bounds.south, z);
-
-      if (minX > maxX || minY > maxY) continue;
-
-      for (var x = minX; x <= maxX; x++) {
-        for (var y = minY; y <= maxY; y++) {
-          result.add(TileCoordinates(x, y, z));
-          if (result.length >= maxTilesPerDownload) {
-            return result;
-          }
-        }
-      }
-    }
-    return result;
-  }
-
-  int estimateTileCount({
-    required LatLngBounds bounds,
-    required int minZoom,
-    required int maxZoom,
-  }) {
-    var total = 0;
-    final zMin = minZoom.clamp(1, 18);
-    final zMax = maxZoom.clamp(zMin, 18);
-    for (var z = zMin; z <= zMax; z++) {
-      final minX = _lonToTileX(bounds.west, z);
-      final maxX = _lonToTileX(bounds.east, z);
-      final minY = _latToTileY(bounds.north, z);
-      final maxY = _latToTileY(bounds.south, z);
-      if (minX <= maxX && minY <= maxY) {
-        total += (maxX - minX + 1) * (maxY - minY + 1);
-      }
-    }
-    return total;
-  }
-
-  Future<(int cached, int total)> countCachedTiles({
-    required String urlTemplate,
-    required LatLngBounds bounds,
-    required int minZoom,
-    required int maxZoom,
-  }) async {
-    final tiles = buildTilesForBounds(
-      bounds: bounds,
-      minZoom: minZoom,
-      maxZoom: maxZoom,
-    );
-    if (tiles.isEmpty || !_cachingProvider.isSupported) {
-      return (0, tiles.length);
-    }
-
-    final provider = createTileProvider(silenceExceptions: true);
-    final layerConfig = TileLayer(
-      urlTemplate: urlTemplate,
-      userAgentPackageName: 'ru.fishingradar.app',
-      tileProvider: provider,
-    );
-
-    var cached = 0;
-    try {
-      for (final coords in tiles) {
-        final url = provider.getTileUrl(coords, layerConfig);
-        final hit = await _cachingProvider.getTile(url);
-        if (hit != null) cached++;
-      }
-    } finally {
-      await provider.dispose();
-    }
-    return (cached, tiles.length);
-  }
-
-  Future<TileDownloadResult> downloadRegion({
-    required String urlTemplate,
-    required LatLngBounds bounds,
-    required int minZoom,
-    required int maxZoom,
-    required void Function(int done, int total, int saved, String phase)
-        onProgress,
-    required bool Function() isCancelled,
-  }) async {
-    final tiles = buildTilesForBounds(
-      bounds: bounds,
-      minZoom: minZoom,
-      maxZoom: maxZoom,
-    );
-    if (tiles.isEmpty) {
-      return const TileDownloadResult(
-        processed: 0,
-        total: 0,
-        saved: 0,
-        failed: 0,
-        timeouts: 0,
-        errors: 0,
-      );
-    }
-
-    onProgress(0, tiles.length, 0, 'Загрузка фрагментов');
-
-    final provider = createTileProvider(silenceExceptions: false);
-    final layerConfig = TileLayer(
-      urlTemplate: urlTemplate,
-      userAgentPackageName: 'ru.fishingradar.app',
-      tileProvider: provider,
-    );
-
-    var done = 0;
-    var saved = 0;
-    var timeouts = 0;
-    var errors = 0;
-    final retryQueue = <TileCoordinates>[];
-    const batchSize = 2;
-
-    try {
-      for (var i = 0; i < tiles.length; i += batchSize) {
-        if (isCancelled()) break;
-        final end = math.min(i + batchSize, tiles.length);
-        final batch = tiles.sublist(i, end);
-
-        final results = await Future.wait(
-          batch.map((coords) => _cacheSingleTile(provider, layerConfig, coords)),
-        );
-
-        for (var j = 0; j < batch.length; j++) {
-          done++;
-          if (results[j] == _TileFetchStatus.ok) {
-            saved++;
-          } else {
-            retryQueue.add(batch[j]);
-          }
-        }
-        onProgress(done, tiles.length, saved, 'Загрузка фрагментов');
-
-        if (end < tiles.length && !isCancelled()) {
-          await Future<void>.delayed(const Duration(milliseconds: 160));
-        }
-      }
-
-      if (retryQueue.isNotEmpty && !isCancelled()) {
-        await Future<void>.delayed(const Duration(milliseconds: 400));
-        var retryDone = 0;
-        for (final coords in retryQueue) {
-          if (isCancelled()) {
-            errors += retryQueue.length - retryDone;
-            break;
-          }
-          final status = await _cacheSingleTile(provider, layerConfig, coords);
-          retryDone++;
-          if (status == _TileFetchStatus.ok) {
-            saved++;
-          } else if (status == _TileFetchStatus.timeout) {
-            timeouts++;
-          } else {
-            errors++;
-          }
-          onProgress(
-            retryDone,
-            retryQueue.length,
-            saved,
-            'Докачка пропущенных',
-          );
-          if (retryDone < retryQueue.length && !isCancelled()) {
-            await Future<void>.delayed(const Duration(milliseconds: 260));
-          }
-        }
-      }
-    } finally {
-      await provider.dispose();
-    }
-
-    return TileDownloadResult(
-      processed: done,
-      total: tiles.length,
-      saved: saved,
-      failed: tiles.length - saved,
-      timeouts: timeouts,
-      errors: errors,
-    );
-  }
-
-  Future<_TileFetchStatus> _cacheSingleTile(
-    NetworkTileProvider provider,
-    TileLayer layerConfig,
-    TileCoordinates coords,
-  ) async {
-    try {
-      final url = provider.getTileUrl(coords, layerConfig);
-      if (_cachingProvider.isSupported) {
-        final existing = await _cachingProvider.getTile(url);
-        if (existing != null) {
-          return _TileFetchStatus.ok;
-        }
-      }
-
-      final imageProvider = provider.getImage(coords, layerConfig);
-      final completer = Completer<_TileFetchStatus>();
-      final stream = imageProvider.resolve(ImageConfiguration.empty);
-      late final ImageStreamListener listener;
-
-      listener = ImageStreamListener(
-        (ImageInfo info, bool _) {
-          info.dispose();
-          stream.removeListener(listener);
-          if (!completer.isCompleted) completer.complete(_TileFetchStatus.ok);
-        },
-        onError: (_, __) {
-          stream.removeListener(listener);
-          if (!completer.isCompleted) {
-            completer.complete(_TileFetchStatus.error);
-          }
-        },
-      );
-
-      stream.addListener(listener);
-      return await completer.future.timeout(
-        const Duration(seconds: 10),
-        onTimeout: () {
-          stream.removeListener(listener);
-          return _TileFetchStatus.timeout;
-        },
-      );
-    } catch (_) {
-      return _TileFetchStatus.error;
-    }
+  TileProvider createMbtilesTileProvider(String path) {
+    return MbTilesTileProvider.fromPath(path: path);
   }
 
   Future<void> clearCache() async {
@@ -292,21 +65,206 @@ class OfflineMapService {
     );
   }
 
-  int _lonToTileX(double lon, int zoom) {
-    final n = 1 << zoom;
-    final x = ((lon + 180.0) / 360.0 * n).floor();
-    return x.clamp(0, n - 1);
+  static String formatFileSize(int bytes) {
+    if (bytes <= 0) return '0 КБ';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).round()} КБ';
+    }
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} МБ';
   }
 
-  int _latToTileY(double lat, int zoom) {
-    final clamped = lat.clamp(-85.05112878, 85.05112878);
-    final latRad = clamped * math.pi / 180.0;
-    final n = 1 << zoom;
-    final y = ((1.0 -
-                math.log(math.tan(latRad) + 1.0 / math.cos(latRad)) / math.pi) /
-            2.0 *
-            n)
-        .floor();
-    return y.clamp(0, n - 1);
+  Future<Directory> _getMbtilesDir() async {
+    final docs = await getApplicationDocumentsDirectory();
+    final dir = Directory('${docs.path}/offline_maps');
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
+  Future<List<LocalMbtilesInfo>> listLocalMbtiles() async {
+    final dir = await _getMbtilesDir();
+    final entities = await dir.list().toList();
+    final items = <LocalMbtilesInfo>[];
+
+    for (final entity in entities) {
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.last;
+      if (!name.toLowerCase().endsWith('.mbtiles')) continue;
+      final stat = await entity.stat();
+      items.add(
+        LocalMbtilesInfo(
+          path: entity.path,
+          fileName: name,
+          sizeBytes: stat.size,
+        ),
+      );
+    }
+
+    items.sort((a, b) => a.fileName.compareTo(b.fileName));
+    return items;
+  }
+
+  Future<LocalMbtilesInfo> importPickedMbtiles(PlatformFile picked) async {
+    final rawName = picked.name.trim();
+    if (!rawName.toLowerCase().endsWith('.mbtiles')) {
+      throw const FormatException('Выберите файл с расширением .mbtiles');
+    }
+
+    final dir = await _getMbtilesDir();
+    final safeName = rawName.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+    final destPath = '${dir.path}/$safeName';
+    final destFile = File(destPath);
+
+    if (picked.path != null && picked.path!.isNotEmpty) {
+      final src = File(picked.path!);
+      await src.copy(destPath);
+    } else {
+      final bytes = await picked.readAsBytes();
+      await destFile.writeAsBytes(bytes, flush: true);
+    }
+
+    try {
+      _validateMbtilesFile(destPath);
+    } catch (e) {
+      if (await destFile.exists()) await destFile.delete();
+      rethrow;
+    }
+
+    final stat = await destFile.stat();
+    return LocalMbtilesInfo(
+      path: destPath,
+      fileName: safeName,
+      sizeBytes: stat.size,
+    );
+  }
+
+  Future<LocalMbtilesInfo?> downloadMbtilesFromUrl({
+    required String url,
+    required String fileName,
+    required void Function(int receivedBytes, int totalBytes) onProgress,
+    required bool Function() isCancelled,
+  }) async {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null || !uri.hasScheme) {
+      throw const FormatException('Некорректная ссылка на файл');
+    }
+
+    final cleanName = fileName.trim().isEmpty ? 'region.mbtiles' : fileName.trim();
+    final finalName = cleanName.toLowerCase().endsWith('.mbtiles')
+        ? cleanName
+        : '$cleanName.mbtiles';
+    final safeName = finalName.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+
+    final dir = await _getMbtilesDir();
+    final destPath = '${dir.path}/$safeName';
+    final partFile = File('$destPath.part');
+    if (await partFile.exists()) await partFile.delete();
+
+    final client = HttpClient();
+    IOSink? sink;
+    try {
+      final request = await client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException(
+          'Сервер вернул ошибку ${response.statusCode}',
+          uri: uri,
+        );
+      }
+
+      final total = response.contentLength;
+      var received = 0;
+      var lastReported = 0;
+      sink = partFile.openWrite();
+
+      await for (final chunk in response) {
+        if (isCancelled()) {
+          await sink.close();
+          sink = null;
+          if (await partFile.exists()) await partFile.delete();
+          return null;
+        }
+        sink.add(chunk);
+        received += chunk.length;
+        if (received - lastReported >= 65536 || received == total) {
+          lastReported = received;
+          onProgress(received, total);
+        }
+      }
+
+      await sink.flush();
+      await sink.close();
+      sink = null;
+
+      onProgress(received, total);
+      _validateMbtilesFile(partFile.path);
+
+      final destFile = File(destPath);
+      if (await destFile.exists()) await destFile.delete();
+      await partFile.rename(destPath);
+
+      final stat = await destFile.stat();
+      return LocalMbtilesInfo(
+        path: destPath,
+        fileName: safeName,
+        sizeBytes: stat.size,
+      );
+    } catch (e) {
+      await sink?.close();
+      if (await partFile.exists()) await partFile.delete();
+      rethrow;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<List<CloudMbtilesInfo>> listCloudMbtiles() async {
+    final api = ApiService();
+    if (!api.isBackendConfigured) return [];
+    try {
+      final objects = await Supabase.instance.client.storage
+          .from('offline-maps')
+          .list();
+
+      final list = <CloudMbtilesInfo>[];
+      for (final obj in objects) {
+        if (!obj.name.toLowerCase().endsWith('.mbtiles')) continue;
+        final url = Supabase.instance.client.storage
+            .from('offline-maps')
+            .getPublicUrl(obj.name);
+        final size = (obj.metadata?['size'] as num?)?.toInt() ?? 0;
+        list.add(
+          CloudMbtilesInfo(
+            name: obj.name,
+            sizeBytes: size,
+            downloadUrl: url,
+          ),
+        );
+      }
+      return list;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> deleteLocalMbtiles(String path) async {
+    final file = File(path);
+    if (await file.exists()) {
+      await file.delete();
+    }
+  }
+
+  void _validateMbtilesFile(String path) {
+    final db = MbTiles(path: path);
+    try {
+      db.getMetadata();
+    } catch (_) {
+      throw const FormatException(
+        'Файл повреждён или не является корректной базой .mbtiles',
+      );
+    } finally {
+      db.close();
+    }
   }
 }
