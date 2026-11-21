@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/chat_message.dart';
@@ -132,10 +133,105 @@ class ApiService {
     await Supabase.instance.client.auth.signOut();
   }
 
+  Future<Directory> _getOfflinePhotosDir() async {
+    final docs = await getApplicationDocumentsDirectory();
+    final dir = Directory('${docs.path}/offline_spot_photos');
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
+  String _safePhotoExt(String ext, {String? fallbackPath}) {
+    var clean = ext.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+    if (clean.isEmpty && fallbackPath != null) {
+      final dotIdx = fallbackPath.lastIndexOf('.');
+      if (dotIdx != -1 && dotIdx < fallbackPath.length - 1) {
+        clean = fallbackPath
+            .substring(dotIdx + 1)
+            .toLowerCase()
+            .replaceAll(RegExp(r'[^a-z0-9]'), '');
+      }
+    }
+    return clean.isEmpty ? 'jpg' : clean;
+  }
+
+  Future<String?> _persistOfflinePhoto({
+    required String spotId,
+    Uint8List? bytes,
+    String? sourcePath,
+    String ext = 'jpg',
+  }) async {
+    try {
+      final dir = await _getOfflinePhotosDir();
+      final safeId = spotId.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+      final safeExt = _safePhotoExt(ext, fallbackPath: sourcePath);
+      final destPath = '${dir.path}/$safeId.$safeExt';
+
+      if (bytes != null && bytes.isNotEmpty) {
+        final file = File(destPath);
+        await file.writeAsBytes(bytes, flush: true);
+        return destPath;
+      }
+
+      if (sourcePath != null && sourcePath.isNotEmpty) {
+        if (sourcePath == destPath && File(destPath).existsSync()) {
+          return destPath;
+        }
+        final src = File(sourcePath);
+        if (src.existsSync()) {
+          await src.copy(destPath);
+          return destPath;
+        }
+      }
+    } catch (_) {}
+    return sourcePath;
+  }
+
+  Future<void> _deleteManagedLocalPhoto(String? path) async {
+    if (path == null || path.isEmpty) return;
+    try {
+      final dir = await _getOfflinePhotosDir();
+      if (!path.startsWith(dir.path)) return;
+      final file = File(path);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (_) {}
+  }
+
+  String? _extractStoragePathFromPublicUrl(String url) {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null) return null;
+    for (final marker in const [
+      '/storage/v1/object/public/spot-photos/',
+      '/storage/v1/object/sign/spot-photos/',
+    ]) {
+      final idx = uri.path.indexOf(marker);
+      if (idx != -1) {
+        final rawPath = uri.path.substring(idx + marker.length);
+        if (rawPath.isNotEmpty) {
+          return Uri.decodeComponent(rawPath);
+        }
+      }
+    }
+    return null;
+  }
+
+  Future<void> _deleteRemotePhotoByUrl(String? url) async {
+    if (!isBackendConfigured || url == null || url.trim().isEmpty) return;
+    final objectPath = _extractStoragePathFromPublicUrl(url);
+    if (objectPath == null) return;
+    try {
+      await Supabase.instance.client.storage
+          .from('spot-photos')
+          .remove([objectPath]);
+    } catch (_) {}
+  }
+
   Future<String?> uploadPhotoBytes(Uint8List bytes, String ext) async {
     if (!isBackendConfigured) return null;
-    final rawExt = ext.trim().toLowerCase();
-    final fileExt = rawExt.isEmpty ? 'jpg' : rawExt;
+    final fileExt = _safePhotoExt(ext);
     final mimeSubtype = fileExt == 'jpg' ? 'jpeg' : fileExt;
     final owner = currentUserId ?? 'anon';
     final path = '$owner/${DateTime.now().millisecondsSinceEpoch}.$fileExt';
@@ -242,16 +338,19 @@ class ApiService {
         } else if (prepared.localPhotoPath != null) {
           final file = File(prepared.localPhotoPath!);
           if (file.existsSync()) {
-            uploadedUrl = await uploadPhotoBytes(
-              await file.readAsBytes(),
+            final ext = _safePhotoExt(
               photoExt,
+              fallbackPath: prepared.localPhotoPath,
             );
+            uploadedUrl = await uploadPhotoBytes(await file.readAsBytes(), ext);
           }
         }
 
-        final inserted = await _insertIntoSupabase(
+        final inserted = (await _insertIntoSupabase(
           prepared.copyWith(photoUrl: uploadedUrl),
-        );
+        ))
+            .copyWith(clearLocalPhotoPath: true);
+        await _deleteManagedLocalPhoto(prepared.localPhotoPath);
         lastErrorNotifier.value = null;
 
         final current = await _loadFromCache();
@@ -265,10 +364,22 @@ class ApiService {
       }
     }
 
+    final offlineId = prepared.id.startsWith('local-')
+        ? prepared.id
+        : 'local-${DateTime.now().millisecondsSinceEpoch}';
+    final persistedPhotoPath =
+        (photoBytes != null || prepared.localPhotoPath != null)
+            ? await _persistOfflinePhoto(
+                spotId: offlineId,
+                bytes: photoBytes,
+                sourcePath: prepared.localPhotoPath,
+                ext: photoExt,
+              )
+            : null;
+
     final offlineSpot = prepared.copyWith(
-      id: prepared.id.startsWith('local-')
-          ? prepared.id
-          : 'local-${DateTime.now().millisecondsSinceEpoch}',
+      id: offlineId,
+      localPhotoPath: persistedPhotoPath,
       isSynced: false,
     );
 
@@ -300,11 +411,22 @@ class ApiService {
       );
     }
 
-    if (isBackendConfigured && updated.isSynced && !updated.id.startsWith('local-')) {
+    final current = await _loadFromCache();
+    final idx = current.indexWhere((s) => s.id == updated.id);
+    final cachedOld = idx != -1 ? current[idx] : null;
+    final oldRemotePhotoUrl = cachedOld?.photoUrl ?? updated.photoUrl;
+    final oldLocalPhotoPath = cachedOld?.localPhotoPath;
+
+    if (isBackendConfigured &&
+        updated.isSynced &&
+        !updated.id.startsWith('local-')) {
       try {
         if (newPhotoBytes != null) {
           final url = await uploadPhotoBytes(newPhotoBytes, photoExt);
-          updated = updated.copyWith(photoUrl: url);
+          updated = updated.copyWith(
+            photoUrl: url,
+            clearLocalPhotoPath: true,
+          );
         }
 
         final row = await Supabase.instance.client
@@ -325,15 +447,33 @@ class ApiService {
             .single();
 
         updated = FishingSpot.fromJson(Map<String, dynamic>.from(row))
-            .copyWith(isSynced: true);
+            .copyWith(isSynced: true, clearLocalPhotoPath: true);
+
+        if (oldRemotePhotoUrl != null &&
+            oldRemotePhotoUrl != updated.photoUrl) {
+          await _deleteRemotePhotoByUrl(oldRemotePhotoUrl);
+        }
+        if (oldLocalPhotoPath != null) {
+          await _deleteManagedLocalPhoto(oldLocalPhotoPath);
+        }
         lastErrorNotifier.value = null;
       } catch (e) {
         lastErrorNotifier.value = 'Ошибка обновления: ${_shortError(e)}';
       }
+    } else {
+      if (newPhotoBytes != null || updated.localPhotoPath != null) {
+        final persistedPath = await _persistOfflinePhoto(
+          spotId: updated.id,
+          bytes: newPhotoBytes,
+          sourcePath: updated.localPhotoPath,
+          ext: photoExt,
+        );
+        updated = updated.copyWith(localPhotoPath: persistedPath);
+      } else if (oldLocalPhotoPath != null && updated.localPhotoPath == null) {
+        await _deleteManagedLocalPhoto(oldLocalPhotoPath);
+      }
     }
 
-    final current = await _loadFromCache();
-    final idx = current.indexWhere((s) => s.id == updated.id);
     if (idx != -1) {
       current[idx] = updated;
     } else {
@@ -344,6 +484,7 @@ class ApiService {
   }
 
   Future<void> deleteSpot(FishingSpot spot) async {
+    var remoteDeleted = false;
     if (isBackendConfigured &&
         spot.isSynced &&
         !spot.id.startsWith('local-') &&
@@ -353,10 +494,16 @@ class ApiService {
             .from('fishing_spots')
             .delete()
             .eq('id', spot.id);
+        remoteDeleted = true;
       } catch (e) {
         lastErrorNotifier.value = 'Ошибка удаления: ${_shortError(e)}';
       }
     }
+
+    if (remoteDeleted && spot.photoUrl != null) {
+      await _deleteRemotePhotoByUrl(spot.photoUrl);
+    }
+    await _deleteManagedLocalPhoto(spot.localPhotoPath);
 
     final current = await _loadFromCache();
     current.removeWhere((s) => s.id == spot.id);
@@ -381,11 +528,18 @@ class ApiService {
         if (prepared.localPhotoPath != null && prepared.photoUrl == null) {
           final file = File(prepared.localPhotoPath!);
           if (file.existsSync()) {
-            final url = await uploadPhotoBytes(await file.readAsBytes(), 'jpg');
+            final ext = _safePhotoExt(
+              '',
+              fallbackPath: prepared.localPhotoPath,
+            );
+            final url = await uploadPhotoBytes(await file.readAsBytes(), ext);
             prepared = prepared.copyWith(photoUrl: url);
           }
         }
-        final uploaded = await _insertIntoSupabase(prepared);
+        final uploaded = (await _insertIntoSupabase(prepared))
+            .copyWith(clearLocalPhotoPath: true);
+        await _deleteManagedLocalPhoto(spot.localPhotoPath);
+
         final idx = current.indexWhere((s) => s.id == spot.id);
         if (idx != -1) {
           current[idx] = uploaded;
