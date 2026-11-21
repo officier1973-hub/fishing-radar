@@ -17,6 +17,7 @@ import '../widgets/map_sheets.dart';
 import '../widgets/weather_sheet.dart';
 import 'auth_page.dart';
 import 'chat_page.dart';
+import 'diary_page.dart';
 import 'report_page.dart';
 
 class MapPage extends StatefulWidget {
@@ -214,6 +215,27 @@ class _MapPageState extends State<MapPage> {
       point: point,
       locationTitle: title,
     );
+  }
+
+  Future<void> _openDiary() async {
+    final selectedTrack = await Navigator.of(context).push<BoatTrack>(
+      MaterialPageRoute(
+        builder: (_) => DiaryPage(
+          initialCenter: _myPosition ?? _currentCenter,
+        ),
+      ),
+    );
+    if (selectedTrack != null && mounted) {
+      setState(() => _loadedTrack = selectedTrack);
+      if (selectedTrack.points.length >= 2 && _isMapReady) {
+        _mapController.fitCamera(
+          CameraFit.bounds(
+            bounds: LatLngBounds.fromPoints(selectedTrack.points),
+            padding: const EdgeInsets.all(48),
+          ),
+        );
+      }
+    }
   }
 
   void _showGpsErrorSnack(LocationPermission perm) {
@@ -1420,6 +1442,13 @@ class _MapPageState extends State<MapPage> {
             ),
             const SizedBox(height: 10),
           ],
+          FloatingActionButton.small(
+            heroTag: 'diary',
+            tooltip: 'Личный дневник и снасти',
+            onPressed: _openDiary,
+            child: const Icon(Icons.menu_book_outlined),
+          ),
+          const SizedBox(height: 10),
           FloatingActionButton.small(
             heroTag: 'weather',
             tooltip: 'Погода, индекс клёва и запреты',
