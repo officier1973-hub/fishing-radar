@@ -3,7 +3,9 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart';
+import '../models/diary_entry.dart';
 import '../models/fishing_spot.dart';
+import '../services/diary_service.dart';
 
 class ReportResult {
   final FishingSpot spot;
@@ -34,6 +36,7 @@ class ReportPage extends StatefulWidget {
 class _ReportPageState extends State<ReportPage> {
   final _formKey = GlobalKey<FormState>();
   final _picker = ImagePicker();
+  final _diaryService = DiaryService();
 
   late final TextEditingController _depthController;
   late final TextEditingController _speciesController;
@@ -47,6 +50,7 @@ class _ReportPageState extends State<ReportPage> {
   String? _pickedPhotoPath;
   String _pickedPhotoExt = 'jpg';
   bool _removeExistingPhoto = false;
+  List<TackleTemplate> _tackles = [];
 
   static const _bottomOptions = [
     'Бровка / свал',
@@ -76,6 +80,21 @@ class _ReportPageState extends State<ReportPage> {
     _bottomType = e?.bottomType ?? _bottomOptions.first;
     _isPrivateCircle = e?.isPrivateCircle ?? false;
     _pickedPhotoPath = e?.localPhotoPath;
+    _loadTackles();
+  }
+
+  Future<void> _loadTackles() async {
+    final list = await _diaryService.loadTackles();
+    if (!mounted) return;
+    setState(() => _tackles = list);
+  }
+
+  void _applyTackleTemplate(TackleTemplate t) {
+    final detail = t.lure.trim().isNotEmpty ? '${t.name} (${t.lure})' : t.name;
+    final tag = 'Снасть: $detail';
+    final current = _commentController.text.trim();
+    if (current.contains(tag)) return;
+    _commentController.text = current.isEmpty ? tag : '$current\n$tag';
   }
 
   @override
@@ -244,6 +263,27 @@ class _ReportPageState extends State<ReportPage> {
                 prefixIcon: Icon(Icons.scale),
               ),
             ),
+            if (_tackles.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              Text(
+                'Подставить снасть из дневника',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: _tackles
+                    .map(
+                      (t) => ActionChip(
+                        avatar: const Icon(Icons.phishing, size: 16),
+                        label: Text(t.name),
+                        onPressed: () => _applyTackleTemplate(t),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ],
             const SizedBox(height: 16),
             TextFormField(
               controller: _commentController,
