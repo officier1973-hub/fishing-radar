@@ -176,16 +176,17 @@ class OfflineMapService {
       final total = response.contentLength;
       var received = 0;
       var lastReported = 0;
-      sink = partFile.openWrite();
+      final writeSink = partFile.openWrite();
+      sink = writeSink;
 
       await for (final chunk in response) {
         if (isCancelled()) {
-          await sink.close();
+          await writeSink.close();
           sink = null;
           if (await partFile.exists()) await partFile.delete();
           return null;
         }
-        sink.add(chunk);
+        writeSink.add(chunk);
         received += chunk.length;
         if (received - lastReported >= 65536 || received == total) {
           lastReported = received;
@@ -193,8 +194,8 @@ class OfflineMapService {
         }
       }
 
-      await sink.flush();
-      await sink.close();
+      await writeSink.flush();
+      await writeSink.close();
       sink = null;
 
       onProgress(received, total);
@@ -211,7 +212,9 @@ class OfflineMapService {
         sizeBytes: stat.size,
       );
     } catch (e) {
-      await sink?.close();
+      try {
+        await sink?.close();
+      } catch (_) {}
       if (await partFile.exists()) await partFile.delete();
       rethrow;
     } finally {
