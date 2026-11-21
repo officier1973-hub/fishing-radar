@@ -9,6 +9,35 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/chat_message.dart';
 import '../models/fishing_spot.dart';
 
+class TrustedPeer {
+  final String id;
+  final String peerUserId;
+  final String peerName;
+  final String direction;
+  final DateTime createdAt;
+
+  const TrustedPeer({
+    required this.id,
+    required this.peerUserId,
+    required this.peerName,
+    required this.direction,
+    required this.createdAt,
+  });
+
+  bool get isOutgoing => direction == 'outgoing';
+
+  factory TrustedPeer.fromJson(Map<String, dynamic> json) {
+    return TrustedPeer(
+      id: (json['id'] ?? '').toString(),
+      peerUserId: (json['peer_user_id'] ?? '').toString(),
+      peerName: (json['peer_name'] ?? 'Рыбак').toString(),
+      direction: (json['direction'] ?? 'outgoing').toString(),
+      createdAt: DateTime.tryParse((json['created_at'] ?? '').toString()) ??
+          DateTime.now(),
+    );
+  }
+}
+
 class ApiService {
   static const String _rawSupabaseUrl = String.fromEnvironment('SUPABASE_URL');
   static const String supabaseKey = String.fromEnvironment('SUPABASE_KEY');
@@ -131,6 +160,66 @@ class ApiService {
   Future<void> signOut() async {
     if (!isBackendConfigured) return;
     await Supabase.instance.client.auth.signOut();
+  }
+
+  Future<String?> getOrCreateMyTrustCode() async {
+    if (!isBackendConfigured || currentUserId == null) return null;
+    try {
+      final res = await Supabase.instance.client.rpc(
+        'get_or_create_my_trust_code',
+        params: {'p_display_name': currentAuthorName},
+      );
+      final code = res?.toString().trim();
+      return (code == null || code.isEmpty) ? null : code;
+    } catch (e) {
+      lastErrorNotifier.value = 'Код доверия: ${_shortError(e)}';
+      return null;
+    }
+  }
+
+  Future<List<TrustedPeer>> fetchMyTrustCircle() async {
+    if (!isBackendConfigured || currentUserId == null) return [];
+    try {
+      final res = await Supabase.instance.client.rpc('get_my_trust_circle');
+      final list = res as List<dynamic>;
+      return list
+          .map((e) => TrustedPeer.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList();
+    } catch (e) {
+      lastErrorNotifier.value = 'Круг доверия: ${_shortError(e)}';
+      return [];
+    }
+  }
+
+  Future<String?> addTrustedFriendByCode(String code) async {
+    if (!isBackendConfigured) return 'Сервер не подключён';
+    if (currentUserId == null) return 'Войдите в аккаунт';
+    final clean = code.trim();
+    if (clean.length < 4) return 'Введите корректный код друга';
+    try {
+      await Supabase.instance.client.rpc(
+        'add_trusted_friend_by_code',
+        params: {'p_code': clean},
+      );
+      return null;
+    } catch (e) {
+      return _shortError(e);
+    }
+  }
+
+  Future<String?> removeTrustedFriend(String peerUserId) async {
+    if (!isBackendConfigured || currentUserId == null) {
+      return 'Сервер не подключён';
+    }
+    try {
+      await Supabase.instance.client.rpc(
+        'remove_trusted_friend',
+        params: {'p_friend_id': peerUserId},
+      );
+      return null;
+    } catch (e) {
+      return _shortError(e);
+    }
   }
 
   Future<Directory> _getOfflinePhotosDir() async {
