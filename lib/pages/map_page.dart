@@ -12,7 +12,9 @@ import '../services/api_service.dart';
 import '../services/location_service.dart';
 import '../services/offline_map_service.dart';
 import '../services/track_service.dart';
+import '../services/weather_service.dart';
 import '../widgets/map_sheets.dart';
+import '../widgets/weather_sheet.dart';
 import 'auth_page.dart';
 import 'chat_page.dart';
 import 'report_page.dart';
@@ -30,6 +32,7 @@ class _MapPageState extends State<MapPage> {
   final LocationService _locationService = LocationService();
   final TrackService _trackService = TrackService();
   final OfflineMapService _offlineService = OfflineMapService();
+  final WeatherService _weatherService = WeatherService();
   final Distance _distanceCalc = const Distance();
 
   late TileProvider _onlineTileProvider;
@@ -202,6 +205,15 @@ class _MapPageState extends State<MapPage> {
     _syncMbtilesProviders(next);
     setState(() => _settings = next);
     _trackService.saveSettings(next);
+  }
+
+  void _openWeatherSheet(LatLng point, {String? title}) {
+    showWeatherAndBiteSheet(
+      context: context,
+      weatherService: _weatherService,
+      point: point,
+      locationTitle: title,
+    );
   }
 
   void _showGpsErrorSnack(LocationPermission perm) {
@@ -435,6 +447,15 @@ class _MapPageState extends State<MapPage> {
                 _setNavTarget(point, 'Точка на карте');
               },
             ),
+            ListTile(
+              leading: const Icon(Icons.wb_sunny_outlined),
+              title: const Text('Погода, клёв и запреты здесь'),
+              subtitle: const Text('Ветер, давление, индекс клёва для этой точки'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _openWeatherSheet(point, title: 'Прогноз в точке карты');
+              },
+            ),
           ],
         ),
       ),
@@ -536,7 +557,14 @@ class _MapPageState extends State<MapPage> {
             child: InteractiveViewer(
               child: localPath != null && File(localPath).existsSync()
                   ? Image.file(File(localPath))
-                  : Image.network(url!),
+                  : Image.network(
+                      url!,
+                      errorBuilder: (_, _, _) => const Icon(
+                        Icons.broken_image_outlined,
+                        color: Colors.white54,
+                        size: 48,
+                      ),
+                    ),
             ),
           ),
         ),
@@ -596,7 +624,22 @@ class _MapPageState extends State<MapPage> {
                               File(spot.localPhotoPath!),
                               fit: BoxFit.cover,
                             )
-                          : Image.network(spot.photoUrl!, fit: BoxFit.cover),
+                          : Image.network(
+                              spot.photoUrl!,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) => Container(
+                                color: Colors.black12,
+                                alignment: Alignment.center,
+                                child: const Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.broken_image_outlined),
+                                    SizedBox(height: 4),
+                                    Text('Фото недоступно офлайн'),
+                                  ],
+                                ),
+                              ),
+                            ),
                     ),
                   ),
                 ),
@@ -621,11 +664,16 @@ class _MapPageState extends State<MapPage> {
                 Padding(
                   padding: const EdgeInsets.only(top: 6),
                   child: Chip(
-                    avatar: const Icon(Icons.shield, size: 18),
+                    avatar: Icon(
+                      spot.isTrustedFriend ? Icons.verified_user : Icons.shield,
+                      size: 18,
+                    ),
                     label: Text(
                       isMine
                           ? 'Круг доверия: вы видите точную точку'
-                          : 'Круг доверия: зона 250 м (точная точка скрыта)',
+                          : spot.isTrustedFriend
+                              ? 'Круг доверия: друг открыл вам точную точку'
+                              : 'Круг доверия: зона 250 м (точная точка скрыта)',
                     ),
                   ),
                 ),
@@ -644,6 +692,21 @@ class _MapPageState extends State<MapPage> {
                     _setNavTarget(
                       spotPoint,
                       '${spot.fishSpecies} (${spot.depthMeters} м)',
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  icon: const Icon(Icons.wb_sunny_outlined),
+                  label: const Text('Погода и индекс клёва в точке'),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    _openWeatherSheet(
+                      spotPoint,
+                      title: '${spot.fishSpecies} • ${spot.depthMeters} м',
                     );
                   },
                 ),
@@ -1088,9 +1151,15 @@ class _MapPageState extends State<MapPage> {
                             ),
                             Icon(
                               spot.isPrivateCircle
-                                  ? Icons.shield
+                                  ? (spot.isTrustedFriend
+                                      ? Icons.verified_user
+                                      : Icons.shield)
                                   : Icons.location_on,
-                              color: spot.isPrivateCircle ? Colors.orange : color,
+                              color: spot.isPrivateCircle
+                                  ? (spot.isTrustedFriend
+                                      ? Colors.teal
+                                      : Colors.orange)
+                                  : color,
                               size: 22,
                             ),
                           ],
@@ -1351,6 +1420,18 @@ class _MapPageState extends State<MapPage> {
             ),
             const SizedBox(height: 10),
           ],
+          FloatingActionButton.small(
+            heroTag: 'weather',
+            tooltip: 'Погода, индекс клёва и запреты',
+            onPressed: () => _openWeatherSheet(
+              _myPosition ?? _currentCenter,
+              title: _myPosition != null
+                  ? 'Погода рядом со мной'
+                  : 'Погода в районе карты',
+            ),
+            child: const Icon(Icons.wb_sunny_outlined),
+          ),
+          const SizedBox(height: 10),
           FloatingActionButton.small(
             heroTag: 'ruler',
             tooltip: _isRulerMode ? 'Выключить линейку' : 'Линейка расстояний',
