@@ -38,50 +38,56 @@ enum DepthFilter {
 class MapLayerSettings {
   final BaseMapType baseMap;
   final bool showSeamarks;
-  final bool showDepthZones;
-  final bool showHeatmap;
   final bool onlyMySpots;
   final String fishFilter;
   final RingPreset ringPreset;
   final DepthFilter depthFilter;
+  final String? activeMbtilesPath;
+  final String? overlayMbtilesPath;
 
   const MapLayerSettings({
     this.baseMap = BaseMapType.standard,
     this.showSeamarks = false,
-    this.showDepthZones = true,
-    this.showHeatmap = false,
     this.onlyMySpots = false,
     this.fishFilter = '',
     this.ringPreset = RingPreset.boat,
     this.depthFilter = DepthFilter.all,
+    this.activeMbtilesPath,
+    this.overlayMbtilesPath,
   });
 
   MapLayerSettings copyWith({
     BaseMapType? baseMap,
     bool? showSeamarks,
-    bool? showDepthZones,
-    bool? showHeatmap,
     bool? onlyMySpots,
     String? fishFilter,
     RingPreset? ringPreset,
     DepthFilter? depthFilter,
+    String? activeMbtilesPath,
+    bool clearActiveMbtiles = false,
+    String? overlayMbtilesPath,
+    bool clearOverlayMbtiles = false,
   }) {
     return MapLayerSettings(
       baseMap: baseMap ?? this.baseMap,
       showSeamarks: showSeamarks ?? this.showSeamarks,
-      showDepthZones: showDepthZones ?? this.showDepthZones,
-      showHeatmap: showHeatmap ?? this.showHeatmap,
       onlyMySpots: onlyMySpots ?? this.onlyMySpots,
       fishFilter: fishFilter ?? this.fishFilter,
       ringPreset: ringPreset ?? this.ringPreset,
       depthFilter: depthFilter ?? this.depthFilter,
+      activeMbtilesPath: clearActiveMbtiles
+          ? null
+          : (activeMbtilesPath ?? this.activeMbtilesPath),
+      overlayMbtilesPath: clearOverlayMbtiles
+          ? null
+          : (overlayMbtilesPath ?? this.overlayMbtilesPath),
     );
   }
 }
 
 class TrackService {
   static const String _tracksKey = 'saved_boat_tracks_v1';
-  static const String _settingsKey = 'map_layer_settings_v2';
+  static const String _settingsKey = 'map_layer_settings_v3';
 
   Future<List<BoatTrack>> loadTracks() async {
     final prefs = await SharedPreferences.getInstance();
@@ -124,12 +130,12 @@ class TrackService {
     return MapLayerSettings(
       baseMap: BaseMapType.values[baseIdx.clamp(0, BaseMapType.values.length - 1)],
       showSeamarks: map['show_seamarks'] == true,
-      showDepthZones: map['show_depth_zones'] != false,
-      showHeatmap: map['show_heatmap'] == true,
       onlyMySpots: map['only_my_spots'] == true,
       fishFilter: (map['fish_filter'] ?? '').toString(),
       ringPreset: RingPreset.values[ringIdx.clamp(0, RingPreset.values.length - 1)],
       depthFilter: DepthFilter.values[depthIdx.clamp(0, DepthFilter.values.length - 1)],
+      activeMbtilesPath: map['active_mbtiles_path']?.toString(),
+      overlayMbtilesPath: map['overlay_mbtiles_path']?.toString(),
     );
   }
 
@@ -140,12 +146,12 @@ class TrackService {
       jsonEncode({
         'base_map': settings.baseMap.index,
         'show_seamarks': settings.showSeamarks,
-        'show_depth_zones': settings.showDepthZones,
-        'show_heatmap': settings.showHeatmap,
         'only_my_spots': settings.onlyMySpots,
         'fish_filter': settings.fishFilter,
         'ring_preset': settings.ringPreset.index,
         'depth_filter': settings.depthFilter.index,
+        'active_mbtiles_path': settings.activeMbtilesPath,
+        'overlay_mbtiles_path': settings.overlayMbtilesPath,
       }),
     );
   }
