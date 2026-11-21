@@ -12,6 +12,7 @@ class FishingSpot {
   final double? fishWeightKg;
   final String comment;
   final bool isPrivateCircle;
+  final bool isTrustedFriend;
   final String? photoUrl;
   final String? localPhotoPath;
   final String? userId;
@@ -31,6 +32,7 @@ class FishingSpot {
     this.fishWeightKg,
     this.comment = '',
     this.isPrivateCircle = false,
+    this.isTrustedFriend = false,
     this.photoUrl,
     this.localPhotoPath,
     this.userId,
@@ -40,13 +42,15 @@ class FishingSpot {
   });
 
   bool isOwnedBy(String? currentUserId) {
-    if (userId == null || userId!.isEmpty) return id.startsWith('local-') || id.startsWith('demo-');
+    if (userId == null || userId!.isEmpty) {
+      return id.startsWith('local-') || id.startsWith('demo-');
+    }
     return currentUserId != null && userId == currentUserId;
   }
 
-  /// Для владельца — точная координата, для чужих при «Круге доверия» — смещённая
+  /// Для владельца и доверенного друга — точная координата, для чужих — смещённая
   LatLng displayPointFor(String? currentUserId) {
-    if (isPrivateCircle && !isOwnedBy(currentUserId)) {
+    if (isPrivateCircle && !isOwnedBy(currentUserId) && !isTrustedFriend) {
       if (publicLatitude != null && publicLongitude != null) {
         return LatLng(publicLatitude!, publicLongitude!);
       }
@@ -67,6 +71,7 @@ class FishingSpot {
     bool clearWeight = false,
     String? comment,
     bool? isPrivateCircle,
+    bool? isTrustedFriend,
     String? photoUrl,
     bool clearPhotoUrl = false,
     String? localPhotoPath,
@@ -88,6 +93,7 @@ class FishingSpot {
       fishWeightKg: clearWeight ? null : (fishWeightKg ?? this.fishWeightKg),
       comment: comment ?? this.comment,
       isPrivateCircle: isPrivateCircle ?? this.isPrivateCircle,
+      isTrustedFriend: isTrustedFriend ?? this.isTrustedFriend,
       photoUrl: clearPhotoUrl ? null : (photoUrl ?? this.photoUrl),
       localPhotoPath: clearLocalPhotoPath
           ? null
@@ -112,6 +118,7 @@ class FishingSpot {
       fishWeightKg: (json['fish_weight_kg'] as num?)?.toDouble(),
       comment: (json['comment'] ?? '').toString(),
       isPrivateCircle: json['is_private_circle'] == true,
+      isTrustedFriend: json['is_trusted_friend'] == true,
       photoUrl: json['photo_url']?.toString(),
       localPhotoPath: json['local_photo_path']?.toString(),
       userId: json['user_id']?.toString(),
@@ -135,6 +142,7 @@ class FishingSpot {
       'fish_weight_kg': fishWeightKg,
       'comment': comment,
       'is_private_circle': isPrivateCircle,
+      'is_trusted_friend': isTrustedFriend,
       'photo_url': photoUrl,
       'local_photo_path': localPhotoPath,
       'user_id': userId,
