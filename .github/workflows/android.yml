@@ -214,3 +214,52 @@ jobs:
                   f'</resources>\n',
                   encoding="utf-8",
               )
+
+              anydpi = res_dir / "mipmap-anydpi-v26"
+              anydpi.mkdir(parents=True, exist_ok=True)
+              (anydpi / "ic_launcher.xml").write_text(
+                  '<?xml version="1.0" encoding="utf-8"?>\n'
+                  '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+                  '    <background android:drawable="@color/ic_launcher_background"/>\n'
+                  '    <foreground android:drawable="@drawable/ic_launcher_foreground"/>\n'
+                  '</adaptive-icon>\n',
+                  encoding="utf-8",
+              )
+
+              splash_xml = (
+                  '<?xml version="1.0" encoding="utf-8"?>\n'
+                  '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">\n'
+                  '    <item android:drawable="@color/ic_launcher_background"/>\n'
+                  '    <item>\n'
+                  '        <bitmap\n'
+                  '            android:gravity="center"\n'
+                  '            android:src="@drawable/ic_splash_logo"/>\n'
+                  '    </item>\n'
+                  '</layer-list>\n'
+              )
+              for d in ("drawable", "drawable-v21"):
+                  ddir = res_dir / d
+                  ddir.mkdir(parents=True, exist_ok=True)
+                  (ddir / "launch_background.xml").write_text(splash_xml, encoding="utf-8")
+          EOF
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos
+
+      - name: Run unit tests
+        run: flutter test
+
+      - name: Build Release APK
+        run: |
+          flutter build apk --release --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }} --dart-define=SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}
+          cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/FishRadar.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: FishRadar
+          path: build/app/outputs/flutter-apk/FishRadar.apk
+          if-no-files-found: error
