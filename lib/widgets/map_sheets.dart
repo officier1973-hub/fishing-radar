@@ -1,5 +1,5 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:intl/intl.dart';
 import '../models/boat_track.dart';
 import '../services/offline_map_service.dart';
@@ -39,6 +39,9 @@ Future<void> showLayersSheet({
             onChanged(next);
           }
 
+          final activeFile = local.activeMbtilesPath?.split('/').last;
+          final overlayFile = local.overlayMbtilesPath?.split('/').last;
+
           return SafeArea(
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
@@ -51,8 +54,42 @@ Future<void> showLayersSheet({
                     style: Theme.of(ctx).textTheme.titleLarge,
                   ),
                   const SizedBox(height: 12),
+                  if (activeFile != null) ...[
+                    Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(ctx).colorScheme.primaryContainer,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.offline_pin, size: 20),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Офлайн-подложка: $activeFile',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () => update(
+                              local.copyWith(clearActiveMbtiles: true),
+                            ),
+                            child: const Text('Онлайн'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   Text(
-                    'Подложка карты',
+                    'Онлайн-подложка',
                     style: Theme.of(ctx).textTheme.labelLarge,
                   ),
                   const SizedBox(height: 8),
@@ -70,34 +107,33 @@ Future<void> showLayersSheet({
                       ),
                     ],
                     selected: {local.baseMap},
-                    onSelectionChanged: (s) =>
-                        update(local.copyWith(baseMap: s.first)),
+                    onSelectionChanged: (s) => update(
+                      local.copyWith(
+                        baseMap: s.first,
+                        clearActiveMbtiles: true,
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 8),
+                  if (overlayFile != null)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.layers),
+                      title: Text('Доп. слой: $overlayFile'),
+                      subtitle: const Text('Подключённый пакет .mbtiles'),
+                      trailing: TextButton(
+                        onPressed: () => update(
+                          local.copyWith(clearOverlayMbtiles: true),
+                        ),
+                        child: const Text('Снять'),
+                      ),
+                    ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Водные знаки и фарватер'),
                     subtitle: const Text('Бакены, створы и судовой ход'),
                     value: local.showSeamarks,
                     onChanged: (v) => update(local.copyWith(showSeamarks: v)),
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Зоны глубин и перепады'),
-                    subtitle: const Text(
-                      'Цветные пятна глубин и линии свалов между соседними точками',
-                    ),
-                    value: local.showDepthZones,
-                    onChanged: (v) => update(local.copyWith(showDepthZones: v)),
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Тепловая карта клёва'),
-                    subtitle: const Text(
-                      'Размер и яркость зависят от свежести, веса и плотности уловов',
-                    ),
-                    value: local.showHeatmap,
-                    onChanged: (v) => update(local.copyWith(showHeatmap: v)),
                   ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
@@ -175,8 +211,8 @@ Future<void> showLayersSheet({
 Future<void> showOfflineCacheSheet({
   required BuildContext context,
   required OfflineMapService offlineService,
-  required LatLngBounds visibleBounds,
-  required BaseMapType baseMap,
+  required MapLayerSettings currentSettings,
+  required ValueChanged<MapLayerSettings> onSettingsChanged,
   VoidCallback? onCacheCleared,
 }) {
   return showModalBottomSheet<void>(
@@ -184,129 +220,253 @@ Future<void> showOfflineCacheSheet({
     showDragHandle: true,
     isScrollControlled: true,
     builder: (ctx) {
-      var detailedZoom = false;
+      var settings = currentSettings;
+      var reloadTick = 0;
       var isDownloading = false;
       var isCancelled = false;
-      var done = 0;
-      var total = 0;
-      var saved = 0;
-      var phaseLabel = 'Загрузка фрагментов';
-      var cacheCheckTick = 0;
+      var receivedBytes = 0;
+      var totalBytes = -1;
+      String? downloadingName;
       String? statusMessage;
 
-      final url = baseMap == BaseMapType.satellite
-          ? OfflineMapService.satelliteUrlTemplate
-          : OfflineMapService.standardUrlTemplate;
+      Future<void> startUrlDownload(
+        StateSetter setSheetState,
+        String url,
+        String name,
+      ) async {
+        setSheetState(() {
+          isDownloading = true;
+          isCancelled = false;
+          receivedBytes = 0;
+          totalBytes = -1;
+          downloadingName = name;
+          statusMessage = null;
+        });
+
+        try {
+          final info = await offlineService.downloadMbtilesFromUrl(
+            url: url,
+            fileName: name,
+            isCancelled: () => isCancelled,
+            onProgress: (rec, tot) {
+              if (!ctx.mounted) return;
+              setSheetState(() {
+                receivedBytes = rec;
+                totalBytes = tot;
+              });
+            },
+          );
+          if (!ctx.mounted) return;
+          setSheetState(() {
+            reloadTick++;
+            if (info == null) {
+              statusMessage = 'Скачивание отменено.';
+            } else {
+              statusMessage =
+                  'Файл «${info.fileName}» (${OfflineMapService.formatFileSize(info.sizeBytes)}) готов. '
+                  'Нажмите «Основа» или «Слой» ниже.';
+            }
+          });
+        } catch (e) {
+          if (!ctx.mounted) return;
+          setSheetState(() => statusMessage = 'Ошибка: $e');
+        } finally {
+          if (ctx.mounted) {
+            setSheetState(() => isDownloading = false);
+          }
+        }
+      }
 
       return StatefulBuilder(
         builder: (ctx, setSheetState) {
-          final maxZoom = detailedZoom ? 15 : 14;
-          const minZoom = 12;
-
-          final estimated = offlineService.estimateTileCount(
-            bounds: visibleBounds,
-            minZoom: minZoom,
-            maxZoom: maxZoom,
-          );
-          final capped = estimated > OfflineMapService.maxTilesPerDownload;
-          final plannedCount =
-              capped ? OfflineMapService.maxTilesPerDownload : estimated;
+          void updateSettings(MapLayerSettings next) {
+            setSheetState(() => settings = next);
+            onSettingsChanged(next);
+          }
 
           return SafeArea(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Офлайн-карта района',
+                    'Офлайн-карты',
                     style: Theme.of(ctx).textTheme.titleLarge,
                   ),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 8),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Авто-кеш просмотра (30 дней)',
+                          style: TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 4),
+                        const Text(
+                          'Всё, что вы пролистали на карте и спутнике при интернете, '
+                          'сохраняется в памяти телефона на 30 дней.',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        const SizedBox(height: 8),
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          label: const Text('Очистить авто-кеш'),
+                          onPressed: isDownloading
+                              ? null
+                              : () async {
+                                  await offlineService.clearCache();
+                                  onCacheCleared?.call();
+                                  if (!ctx.mounted) return;
+                                  setSheetState(() {
+                                    statusMessage = 'Авто-кеш очищен.';
+                                  });
+                                },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Карты регионов (.mbtiles)',
+                    style: Theme.of(ctx).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 4),
                   const Text(
-                    'Просмотренные участки сохраняются на 30 дней автоматически. '
-                    'Чтобы убедиться в работе офлайна, включите «Режим полёта» и подвигайте карту.',
+                    'Скачанный пакет .mbtiles работает на 100% без интернета — '
+                    'можно выбрать с телефона, по ссылке или из облака.',
+                    style: TextStyle(fontSize: 13),
                   ),
                   const SizedBox(height: 10),
-                  FutureBuilder<(int, int)>(
-                    key: ValueKey('$cacheCheckTick-$detailedZoom'),
-                    future: offlineService.countCachedTiles(
-                      urlTemplate: url,
-                      bounds: visibleBounds,
-                      minZoom: minZoom,
-                      maxZoom: maxZoom,
-                    ),
-                    builder: (_, snap) {
-                      if (!snap.hasData) {
-                        return const SizedBox.shrink();
-                      }
-                      final (cached, all) = snap.data!;
-                      final pct = all > 0 ? ((cached / all) * 100).round() : 0;
-                      return Container(
-                        width: double.infinity,
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          icon: const Icon(Icons.folder_open),
+                          label: const Text('С телефона'),
+                          onPressed: isDownloading
+                              ? null
+                              : () async {
+                                  try {
+                                    final picked = await FilePicker.pickFile();
+                                    if (picked == null) return;
+                                    final imported = await offlineService
+                                        .importPickedMbtiles(picked);
+                                    if (!ctx.mounted) return;
+                                    setSheetState(() {
+                                      reloadTick++;
+                                      statusMessage =
+                                          'Добавлена карта «${imported.fileName}» '
+                                          '(${OfflineMapService.formatFileSize(imported.sizeBytes)}).';
+                                    });
+                                  } catch (e) {
+                                    if (!ctx.mounted) return;
+                                    setSheetState(() {
+                                      statusMessage = 'Ошибка импорта: $e';
+                                    });
+                                  }
+                                },
                         ),
-                        decoration: BoxDecoration(
-                          color: Theme.of(ctx)
-                              .colorScheme
-                              .surfaceContainerHighest,
-                          borderRadius: BorderRadius.circular(12),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.link),
+                          label: const Text('По ссылке'),
+                          onPressed: isDownloading
+                              ? null
+                              : () async {
+                                  final urlCtrl = TextEditingController();
+                                  final nameCtrl = TextEditingController(
+                                    text: 'region.mbtiles',
+                                  );
+                                  final ok = await showDialog<bool>(
+                                    context: ctx,
+                                    builder: (dCtx) => AlertDialog(
+                                      title: const Text('Скачать .mbtiles'),
+                                      content: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          TextField(
+                                            controller: urlCtrl,
+                                            decoration: const InputDecoration(
+                                              labelText: 'Прямая ссылка (https://...)',
+                                              border: OutlineInputBorder(),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 10),
+                                          TextField(
+                                            controller: nameCtrl,
+                                            decoration: const InputDecoration(
+                                              labelText: 'Имя файла',
+                                              border: OutlineInputBorder(),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.of(dCtx).pop(false),
+                                          child: const Text('Отмена'),
+                                        ),
+                                        FilledButton(
+                                          onPressed: () =>
+                                              Navigator.of(dCtx).pop(true),
+                                          child: const Text('Скачать'),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                  final url = urlCtrl.text.trim();
+                                  final name = nameCtrl.text.trim();
+                                  urlCtrl.dispose();
+                                  nameCtrl.dispose();
+                                  if (ok == true && url.isNotEmpty && ctx.mounted) {
+                                    await startUrlDownload(
+                                      setSheetState,
+                                      url,
+                                      name,
+                                    );
+                                  }
+                                },
                         ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              pct == 100 ? Icons.check_circle : Icons.sd_storage,
-                              size: 20,
-                              color: pct == 100
-                                  ? Colors.green.shade700
-                                  : Theme.of(ctx).colorScheme.primary,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                'В памяти телефона: $cached из $all фрагментов ($pct%)',
-                                style: Theme.of(ctx)
-                                    .textTheme
-                                    .bodyMedium
-                                    ?.copyWith(fontWeight: FontWeight.w600),
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Высокая детализация (зум 12–15)'),
-                    subtitle: const Text(
-                      'Выше точность берега, но больше фрагментов',
-                    ),
-                    value: detailedZoom,
-                    onChanged: isDownloading
-                        ? null
-                        : (v) => setSheetState(() => detailedZoom = v),
-                  ),
-                  Text(
-                    capped
-                        ? 'К загрузке: $plannedCount фрагментов (лимит за 1 раз — приблизьте карту)'
-                        : 'К загрузке: $plannedCount фрагментов (≈ ${(plannedCount * 0.025).toStringAsFixed(1)} МБ)',
-                    style: Theme.of(ctx).textTheme.bodyMedium,
+                      ),
+                    ],
                   ),
                   if (isDownloading) ...[
                     const SizedBox(height: 12),
                     LinearProgressIndicator(
-                      value: total > 0 ? (done / total).clamp(0.0, 1.0) : 0.0,
+                      value: totalBytes > 0
+                          ? (receivedBytes / totalBytes).clamp(0.0, 1.0)
+                          : null,
                     ),
                     const SizedBox(height: 6),
-                    Text('$phaseLabel: $done из $total'),
-                    Text(
-                      'Всего сохранено в память: $saved из $plannedCount',
-                      style: Theme.of(ctx).textTheme.bodySmall,
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            totalBytes > 0
+                                ? 'Скачивание $downloadingName: '
+                                    '${OfflineMapService.formatFileSize(receivedBytes)} из '
+                                    '${OfflineMapService.formatFileSize(totalBytes)}'
+                                : 'Скачивание $downloadingName: '
+                                    '${OfflineMapService.formatFileSize(receivedBytes)}',
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => isCancelled = true,
+                          child: const Text('Отмена'),
+                        ),
+                      ],
                     ),
                   ],
                   if (statusMessage != null) ...[
@@ -318,102 +478,166 @@ Future<void> showOfflineCacheSheet({
                       ),
                     ),
                   ],
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: FilledButton.icon(
-                          icon: Icon(
-                            isDownloading ? Icons.close : Icons.download,
+                  const SizedBox(height: 14),
+                  FutureBuilder<List<LocalMbtilesInfo>>(
+                    key: ValueKey('local-$reloadTick'),
+                    future: offlineService.listLocalMbtiles(),
+                    builder: (_, snap) {
+                      final files = snap.data ?? [];
+                      if (files.isEmpty) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8),
+                          child: Text(
+                            'На телефоне пока нет файлов .mbtiles.',
+                            style: TextStyle(fontSize: 13),
                           ),
-                          label: Text(
-                            isDownloading ? 'Отменить' : 'Скачать область',
+                        );
+                      }
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Подключённые на телефоне:',
+                            style: Theme.of(ctx).textTheme.labelLarge,
                           ),
-                          onPressed: () async {
-                            if (isDownloading) {
-                              isCancelled = true;
-                              return;
-                            }
-                            setSheetState(() {
-                              isDownloading = true;
-                              isCancelled = false;
-                              done = 0;
-                              total = plannedCount;
-                              saved = 0;
-                              phaseLabel = 'Загрузка фрагментов';
-                              statusMessage = null;
-                            });
-
-                            try {
-                              final result =
-                                  await offlineService.downloadRegion(
-                                urlTemplate: url,
-                                bounds: visibleBounds,
-                                minZoom: minZoom,
-                                maxZoom: maxZoom,
-                                isCancelled: () => isCancelled,
-                                onProgress: (d, t, s, phase) {
-                                  if (!ctx.mounted) return;
-                                  setSheetState(() {
-                                    done = d;
-                                    total = t;
-                                    saved = s;
-                                    phaseLabel = phase;
-                                  });
-                                },
-                              );
-
-                              if (!ctx.mounted) return;
-                              setSheetState(() {
-                                cacheCheckTick++;
-                                if (isCancelled) {
-                                  statusMessage =
-                                      'Остановлено: сохранено ${result.saved} из ${result.total}.';
-                                } else if (result.saved == 0 &&
-                                    result.total > 0) {
-                                  statusMessage =
-                                      'Не удалось скачать карту — проверьте интернет.';
-                                } else if (result.failed > 0) {
-                                  statusMessage =
-                                      'Сохранено ${result.saved} из ${result.total}. '
-                                      'Пропущено ${result.failed} (таймаут сети: ${result.timeouts}, '
-                                      'ограничение/ошибка сервера: ${result.errors}). '
-                                      'Нажмите «Скачать область» ещё раз для докачки.';
-                                } else {
-                                  statusMessage =
-                                      'Готово! Сохранены все ${result.saved} из ${result.total} фрагментов.';
-                                }
-                              });
-                            } catch (e) {
-                              if (!ctx.mounted) return;
-                              setSheetState(() {
-                                statusMessage = 'Ошибка загрузки: $e';
-                              });
-                            } finally {
-                              if (ctx.mounted) {
-                                setSheetState(() => isDownloading = false);
-                              }
-                            }
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      OutlinedButton.icon(
-                        icon: const Icon(Icons.delete_outline),
-                        label: const Text('Очистить'),
-                        onPressed: isDownloading
-                            ? null
-                            : () async {
-                                await offlineService.clearCache();
-                                onCacheCleared?.call();
-                                if (!ctx.mounted) return;
-                                setSheetState(() {
-                                  cacheCheckTick++;
-                                  statusMessage = 'Кеш карт очищен.';
-                                });
-                              },
-                      ),
-                    ],
+                          const SizedBox(height: 6),
+                          ...files.map((item) {
+                            final isBase =
+                                settings.activeMbtilesPath == item.path;
+                            final isOverlay =
+                                settings.overlayMbtilesPath == item.path;
+                            return Card(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              child: Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  12,
+                                  8,
+                                  8,
+                                  8,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        const Icon(Icons.map_outlined, size: 20),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            '${item.fileName} • ${OfflineMapService.formatFileSize(item.sizeBytes)}',
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                        IconButton(
+                                          tooltip: 'Удалить файл',
+                                          icon: const Icon(
+                                            Icons.delete_outline,
+                                            size: 20,
+                                          ),
+                                          onPressed: isDownloading
+                                              ? null
+                                              : () async {
+                                                  await offlineService
+                                                      .deleteLocalMbtiles(
+                                                    item.path,
+                                                  );
+                                                  if (isBase || isOverlay) {
+                                                    updateSettings(
+                                                      settings.copyWith(
+                                                        clearActiveMbtiles:
+                                                            isBase,
+                                                        clearOverlayMbtiles:
+                                                            isOverlay,
+                                                      ),
+                                                    );
+                                                  }
+                                                  if (!ctx.mounted) return;
+                                                  setSheetState(() => reloadTick++);
+                                                },
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Wrap(
+                                      spacing: 8,
+                                      children: [
+                                        FilterChip(
+                                          label: const Text('Основа карты'),
+                                          selected: isBase,
+                                          onSelected: (v) => updateSettings(
+                                            settings.copyWith(
+                                              activeMbtilesPath:
+                                                  v ? item.path : null,
+                                              clearActiveMbtiles: !v,
+                                            ),
+                                          ),
+                                        ),
+                                        FilterChip(
+                                          label: const Text('Верхний слой'),
+                                          selected: isOverlay,
+                                          onSelected: (v) => updateSettings(
+                                            settings.copyWith(
+                                              overlayMbtilesPath:
+                                                  v ? item.path : null,
+                                              clearOverlayMbtiles: !v,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          }),
+                        ],
+                      );
+                    },
+                  ),
+                  FutureBuilder<List<CloudMbtilesInfo>>(
+                    key: ValueKey('cloud-$reloadTick'),
+                    future: offlineService.listCloudMbtiles(),
+                    builder: (_, snap) {
+                      final cloudFiles = snap.data ?? [];
+                      if (cloudFiles.isEmpty) return const SizedBox.shrink();
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const SizedBox(height: 10),
+                          Text(
+                            'Доступно в облаке (Supabase):',
+                            style: Theme.of(ctx).textTheme.labelLarge,
+                          ),
+                          const SizedBox(height: 6),
+                          ...cloudFiles.map((cf) {
+                            return ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: const Icon(Icons.cloud_download_outlined),
+                              title: Text(cf.name),
+                              subtitle: cf.sizeBytes > 0
+                                  ? Text(
+                                      OfflineMapService.formatFileSize(
+                                        cf.sizeBytes,
+                                      ),
+                                    )
+                                  : null,
+                              trailing: FilledButton.tonal(
+                                onPressed: isDownloading
+                                    ? null
+                                    : () => startUrlDownload(
+                                          setSheetState,
+                                          cf.downloadUrl,
+                                          cf.name,
+                                        ),
+                                child: const Text('Скачать'),
+                              ),
+                            );
+                          }),
+                        ],
+                      );
+                    },
                   ),
                 ],
               ),
