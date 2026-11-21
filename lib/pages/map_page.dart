@@ -32,7 +32,11 @@ class _MapPageState extends State<MapPage> {
   final OfflineMapService _offlineService = OfflineMapService();
   final Distance _distanceCalc = const Distance();
 
-  late TileProvider _tileProvider;
+  late TileProvider _onlineTileProvider;
+  TileProvider? _activeMbtilesProvider;
+  String? _activeMbtilesPathLoaded;
+  TileProvider? _overlayMbtilesProvider;
+  String? _overlayMbtilesPathLoaded;
 
   LatLng _currentCenter = const LatLng(53.2001, 50.1500);
   double _currentZoom = 13.0;
@@ -67,18 +71,55 @@ class _MapPageState extends State<MapPage> {
   @override
   void initState() {
     super.initState();
-    _tileProvider = _createSafeTileProvider();
+    _onlineTileProvider = _createSafeOnlineProvider();
     ApiService.backendReadyNotifier.addListener(_onBackendReady);
     ApiService.pendingCountNotifier.addListener(_onStatusChanged);
     ApiService.lastErrorNotifier.addListener(_onStatusChanged);
     _initData();
   }
 
-  TileProvider _createSafeTileProvider() {
+  TileProvider _createSafeOnlineProvider() {
     try {
       return _offlineService.createTileProvider();
     } catch (_) {
       return NetworkTileProvider();
+    }
+  }
+
+  void _syncMbtilesProviders(MapLayerSettings next) {
+    if (next.activeMbtilesPath != _activeMbtilesPathLoaded) {
+      _activeMbtilesProvider?.dispose();
+      _activeMbtilesProvider = null;
+      _activeMbtilesPathLoaded = null;
+
+      final p = next.activeMbtilesPath;
+      if (p != null && File(p).existsSync()) {
+        try {
+          _activeMbtilesProvider = _offlineService.createMbtilesTileProvider(p);
+          _activeMbtilesPathLoaded = p;
+        } catch (_) {
+          _activeMbtilesProvider = null;
+          _activeMbtilesPathLoaded = null;
+        }
+      }
+    }
+
+    if (next.overlayMbtilesPath != _overlayMbtilesPathLoaded) {
+      _overlayMbtilesProvider?.dispose();
+      _overlayMbtilesProvider = null;
+      _overlayMbtilesPathLoaded = null;
+
+      final p = next.overlayMbtilesPath;
+      if (p != null && File(p).existsSync()) {
+        try {
+          _overlayMbtilesProvider =
+              _offlineService.createMbtilesTileProvider(p);
+          _overlayMbtilesPathLoaded = p;
+        } catch (_) {
+          _overlayMbtilesProvider = null;
+          _overlayMbtilesPathLoaded = null;
+        }
+      }
     }
   }
 
@@ -102,7 +143,9 @@ class _MapPageState extends State<MapPage> {
     ApiService.pendingCountNotifier.removeListener(_onStatusChanged);
     ApiService.lastErrorNotifier.removeListener(_onStatusChanged);
     _trackSub?.cancel();
-    _tileProvider.dispose();
+    _onlineTileProvider.dispose();
+    _activeMbtilesProvider?.dispose();
+    _overlayMbtilesProvider?.dispose();
     _mapController.dispose();
     super.dispose();
   }
@@ -118,6 +161,7 @@ class _MapPageState extends State<MapPage> {
   Future<void> _initData() async {
     try {
       final savedSettings = await _trackService.loadSettings();
+      _syncMbtilesProviders(savedSettings);
       if (mounted) {
         setState(() => _settings = savedSettings);
       }
@@ -155,6 +199,7 @@ class _MapPageState extends State<MapPage> {
   }
 
   void _updateSettings(MapLayerSettings next) {
+    _syncMbtilesProviders(next);
     setState(() => _settings = next);
     _trackService.saveSettings(next);
   }
@@ -638,101 +683,6 @@ class _MapPageState extends State<MapPage> {
     );
   }
 
-  /// Оценка «жара» точки для тепловой карты (0.20 – 1.0): свежесть + вес + плотность рядом
-  double _computeHeatScore(
-    FishingSpot spot,
-    List<FishingSpot> all,
-    String? myId,
-  ) {
-    final ageDays = DateTime.now().difference(spot.createdAt).inDays;
-    final freshness = ageDays <= 3
-        ? 0.50
-        : ageDays <= 7
-            ? 0.40
-            : ageDays <= 30
-                ? 0.25
-                : 0.12;
-
-    final weight = spot.fishWeightKg ?? 0.0;
-    final weightBonus = weight >= 3.0
-        ? 0.25
-        : weight >= 1.0
-            ? 0.15
-            : 0.05;
-
-    final pt = spot.displayPointFor(myId);
-    var neighbors = 0;
-    for (final other in all) {
-      if (other.id == spot.id) continue;
-      final otherPt = other.displayPointFor(myId);
-      if ((pt.latitude - otherPt.latitude).abs() > 0.005 ||
-          (pt.longitude - otherPt.longitude).abs() > 0.008) {
-        continue;
-      }
-      if (_distanceCalc.as(LengthUnit.Meter, pt, otherPt) <= 350) {
-        neighbors++;
-        if (neighbors >= 3) break;
-      }
-    }
-    final clusterBonus = neighbors * 0.12;
-
-    return (freshness + weightBonus + clusterBonus).clamp(0.20, 1.0);
-  }
-
-  /// Перепады глубин (свалы/бровки) между соседними точками в радиусе до 800 м
-  List<_DepthDropSegment> _computeDepthDrops(
-    List<FishingSpot> spots,
-    String? myId,
-  ) {
-    if (spots.length < 2) return const [];
-    final drops = <_DepthDropSegment>[];
-    final seenPairs = <String>{};
-
-    for (var i = 0; i < spots.length; i++) {
-      final a = spots[i];
-      final ptA = a.displayPointFor(myId);
-      int? bestJ;
-      var bestDist = double.infinity;
-
-      for (var j = 0; j < spots.length; j++) {
-        if (i == j) continue;
-        final b = spots[j];
-        if ((a.depthMeters - b.depthMeters).abs() < 1.5) continue;
-        final ptB = b.displayPointFor(myId);
-        if ((ptA.latitude - ptB.latitude).abs() > 0.01 ||
-            (ptA.longitude - ptB.longitude).abs() > 0.015) {
-          continue;
-        }
-        final dist = _distanceCalc.as(LengthUnit.Meter, ptA, ptB);
-        if (dist >= 35 && dist <= 800 && dist < bestDist) {
-          bestDist = dist;
-          bestJ = j;
-        }
-      }
-
-      if (bestJ != null) {
-        final low = i < bestJ ? i : bestJ;
-        final high = i < bestJ ? bestJ : i;
-        final key = '$low-$high';
-        if (seenPairs.add(key)) {
-          final b = spots[bestJ];
-          final ptB = b.displayPointFor(myId);
-          final shallowPt = a.depthMeters <= b.depthMeters ? ptA : ptB;
-          final deepPt = a.depthMeters <= b.depthMeters ? ptB : ptA;
-          drops.add(
-            _DepthDropSegment(
-              from: shallowPt,
-              to: deepPt,
-              dropMeters: (a.depthMeters - b.depthMeters).abs(),
-            ),
-          );
-          if (drops.length >= 30) break;
-        }
-      }
-    }
-    return drops;
-  }
-
   Color _depthColor(double depth) {
     if (depth < 3) return Colors.green.shade600;
     if (depth < 7) return Colors.blue.shade700;
@@ -774,10 +724,6 @@ class _MapPageState extends State<MapPage> {
       return true;
     }).toList();
 
-    final depthDrops = _settings.showDepthZones
-        ? _computeDepthDrops(filteredSpots, myId)
-        : const <_DepthDropSegment>[];
-
     final baseUrl = _settings.baseMap == BaseMapType.satellite
         ? OfflineMapService.satelliteUrlTemplate
         : OfflineMapService.standardUrlTemplate;
@@ -794,6 +740,8 @@ class _MapPageState extends State<MapPage> {
       final rawBearing = _distanceCalc.bearing(navOrigin, _navTargetPoint!);
       navBearingDeg = ((rawBearing % 360) + 360) % 360;
     }
+
+    final activeMbtilesName = _activeMbtilesPathLoaded?.split('/').last;
 
     return Scaffold(
       appBar: AppBar(
@@ -834,25 +782,26 @@ class _MapPageState extends State<MapPage> {
             ),
           ),
           IconButton(
-            tooltip: 'Офлайн-карты (скачать район)',
-            icon: const Icon(Icons.cloud_download_outlined),
-            onPressed: () {
-              if (!_isMapReady) return;
-              showOfflineCacheSheet(
-                context: context,
-                offlineService: _offlineService,
-                visibleBounds: _mapController.camera.visibleBounds,
-                baseMap: _settings.baseMap,
-                onCacheCleared: () {
-                  final old = _tileProvider;
-                  setState(() => _tileProvider = _createSafeTileProvider());
-                  old.dispose();
-                },
-              );
-            },
+            tooltip: 'Офлайн-карты',
+            icon: Icon(
+              _activeMbtilesProvider != null || _overlayMbtilesProvider != null
+                  ? Icons.offline_pin
+                  : Icons.cloud_download_outlined,
+            ),
+            onPressed: () => showOfflineCacheSheet(
+              context: context,
+              offlineService: _offlineService,
+              currentSettings: _settings,
+              onSettingsChanged: _updateSettings,
+              onCacheCleared: () {
+                final old = _onlineTileProvider;
+                setState(() => _onlineTileProvider = _createSafeOnlineProvider());
+                old.dispose();
+              },
+            ),
           ),
           IconButton(
-            tooltip: 'Слои, глубины и фильтры',
+            tooltip: 'Слои и фильтры',
             icon: const Icon(Icons.layers),
             onPressed: () => showLayersSheet(
               context: context,
@@ -915,111 +864,33 @@ class _MapPageState extends State<MapPage> {
               },
             ),
             children: [
-              TileLayer(
-                urlTemplate: baseUrl,
-                userAgentPackageName: 'ru.fishingradar.app',
-                tileProvider: _tileProvider,
-                maxNativeZoom: 19,
-              ),
+              if (_activeMbtilesProvider != null)
+                TileLayer(
+                  key: ValueKey('mbtiles-base-$_activeMbtilesPathLoaded'),
+                  tileProvider: _activeMbtilesProvider!,
+                  maxNativeZoom: 18,
+                )
+              else
+                TileLayer(
+                  key: ValueKey('online-base-${_settings.baseMap.name}'),
+                  urlTemplate: baseUrl,
+                  userAgentPackageName: 'ru.fishingradar.app',
+                  tileProvider: _onlineTileProvider,
+                  maxNativeZoom: 19,
+                ),
+              if (_overlayMbtilesProvider != null)
+                TileLayer(
+                  key: ValueKey('mbtiles-overlay-$_overlayMbtilesPathLoaded'),
+                  tileProvider: _overlayMbtilesProvider!,
+                  maxNativeZoom: 18,
+                ),
               if (_settings.showSeamarks)
                 TileLayer(
                   urlTemplate: OfflineMapService.seamarkUrlTemplate,
                   userAgentPackageName: 'ru.fishingradar.app',
-                  tileProvider: _tileProvider,
+                  tileProvider: _onlineTileProvider,
                   maxNativeZoom: 18,
                 ),
-              // 1) Мягкие пятна глубин (размер растёт с глубиной, без «мишеней»)
-              if (_settings.showDepthZones && filteredSpots.isNotEmpty)
-                CircleLayer<Object>(
-                  circles: <CircleMarker<Object>>[
-                    ...filteredSpots.map((s) {
-                      final pt = s.displayPointFor(myId);
-                      final color = _depthColor(s.depthMeters);
-                      final r = 24.0 + s.depthMeters.clamp(1.0, 18.0) * 1.9;
-                      return CircleMarker<Object>(
-                        point: pt,
-                        radius: r,
-                        useRadiusInMeter: false,
-                        color: color.withValues(alpha: 0.24),
-                        borderStrokeWidth: 0,
-                      );
-                    }),
-                    ...filteredSpots.map((s) {
-                      final pt = s.displayPointFor(myId);
-                      final color = _depthColor(s.depthMeters);
-                      final r = 14.0 + s.depthMeters.clamp(1.0, 18.0) * 1.1;
-                      return CircleMarker<Object>(
-                        point: pt,
-                        radius: r,
-                        useRadiusInMeter: false,
-                        color: color.withValues(alpha: 0.36),
-                        borderStrokeWidth: 0,
-                      );
-                    }),
-                  ],
-                ),
-              // 2) Линии свалов/перепадов глубин между соседними точками
-              if (depthDrops.isNotEmpty)
-                PolylineLayer<Object>(
-                  polylines: depthDrops
-                      .map(
-                        (d) => Polyline<Object>(
-                          points: [d.from, d.to],
-                          color: Colors.indigo.shade900.withValues(alpha: 0.78),
-                          strokeWidth: 2.5,
-                          pattern: StrokePattern.dashed(segments: const [8, 6]),
-                        ),
-                      )
-                      .toList(),
-                ),
-              // 3) Тепловая карта (индивидуальный размер/цвет по силе и свежести клёва)
-              if (_settings.showHeatmap && filteredSpots.isNotEmpty)
-                CircleLayer<Object>(
-                  circles: <CircleMarker<Object>>[
-                    for (final s in filteredSpots) ...() {
-                      final score = _computeHeatScore(s, filteredSpots, myId);
-                      final pt = s.displayPointFor(myId);
-                      final outerR = 26.0 + score * 38.0;
-                      final list = <CircleMarker<Object>>[
-                        CircleMarker<Object>(
-                          point: pt,
-                          radius: outerR,
-                          useRadiusInMeter: false,
-                          color: Colors.amber.withValues(
-                            alpha: 0.20 + score * 0.20,
-                          ),
-                          borderStrokeWidth: 0,
-                        ),
-                      ];
-                      if (score >= 0.45) {
-                        list.add(
-                          CircleMarker<Object>(
-                            point: pt,
-                            radius: outerR * 0.64,
-                            useRadiusInMeter: false,
-                            color: Colors.deepOrange.withValues(
-                              alpha: 0.28 + score * 0.22,
-                            ),
-                            borderStrokeWidth: 0,
-                          ),
-                        );
-                      }
-                      if (score >= 0.72) {
-                        list.add(
-                          CircleMarker<Object>(
-                            point: pt,
-                            radius: outerR * 0.36,
-                            useRadiusInMeter: false,
-                            color: Colors.red.withValues(alpha: 0.62),
-                            borderStrokeWidth: 0,
-                          ),
-                        );
-                      }
-                      return list;
-                    }(),
-                  ],
-                ),
-              // Кольца расстояний
               if (_settings.ringPreset.radii.isNotEmpty)
                 CircleLayer<Object>(
                   circles: _settings.ringPreset.radii
@@ -1066,7 +937,6 @@ class _MapPageState extends State<MapPage> {
                     );
                   }).toList(),
                 ),
-              // Приватные зоны «Круг доверия» (радиус 250 м)
               CircleLayer<Object>(
                 circles: filteredSpots.where((s) => s.isPrivateCircle).map((s) {
                   final center = (s.publicLatitude != null &&
@@ -1126,34 +996,6 @@ class _MapPageState extends State<MapPage> {
                 ),
               MarkerLayer(
                 markers: [
-                  // Подписи перепадов глубин (свалов)
-                  ...depthDrops.map(
-                    (d) => Marker(
-                      point: d.midpoint,
-                      width: 68,
-                      height: 22,
-                      child: Center(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 5,
-                            vertical: 1,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.indigo.shade900.withValues(alpha: 0.85),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            '↘ ${d.dropMeters.toStringAsFixed(1)}м',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
                   if (_myPosition != null)
                     Marker(
                       point: _myPosition!,
@@ -1379,121 +1221,26 @@ class _MapPageState extends State<MapPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Wrap(
-                  spacing: 6,
-                  children: [
-                    FilterChip(
-                      avatar: Icon(
-                        Icons.water,
-                        size: 16,
-                        color: _settings.showDepthZones
-                            ? Colors.white
-                            : Colors.teal,
-                      ),
-                      label: Text(
-                        'Глубины',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color:
-                              _settings.showDepthZones ? Colors.white : null,
-                        ),
-                      ),
-                      selected: _settings.showDepthZones,
-                      selectedColor: Colors.teal.shade700,
-                      checkmarkColor: Colors.white,
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (v) {
-                        _updateSettings(
-                          _settings.copyWith(showDepthZones: v),
-                        );
-                        if (v && filteredSpots.isEmpty) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text(
-                                'Нет точек для отображения глубин (проверьте фильтры)',
-                              ),
-                            ),
-                          );
-                        }
-                      },
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
                     ),
-                    FilterChip(
-                      avatar: Icon(
-                        Icons.local_fire_department,
-                        size: 16,
-                        color: _settings.showHeatmap
-                            ? Colors.white
-                            : Colors.deepOrange,
-                      ),
-                      label: Text(
-                        'Тепловая',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: _settings.showHeatmap ? Colors.white : null,
-                        ),
-                      ),
-                      selected: _settings.showHeatmap,
-                      selectedColor: Colors.deepOrange.shade700,
-                      checkmarkColor: Colors.white,
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (v) {
-                        _updateSettings(
-                          _settings.copyWith(showHeatmap: v),
-                        );
-                        if (v && filteredSpots.isEmpty) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text(
-                                'Нет точек для тепловой карты (проверьте фильтры)',
-                              ),
-                            ),
-                          );
-                        }
-                      },
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _legendDot(Colors.green.shade600, '<3м'),
+                        const SizedBox(width: 8),
+                        _legendDot(Colors.blue.shade700, '3–7м'),
+                        const SizedBox(width: 8),
+                        _legendDot(Colors.indigo.shade800, '7–12м'),
+                        const SizedBox(width: 8),
+                        _legendDot(Colors.purple.shade800, '>12м'),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
-                const SizedBox(height: 4),
-                if (_settings.showDepthZones)
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 5,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _legendDot(Colors.green.shade600, '<3м мель'),
-                          const SizedBox(width: 7),
-                          _legendDot(Colors.blue.shade700, '3–7м'),
-                          const SizedBox(width: 7),
-                          _legendDot(Colors.indigo.shade800, '7–12м'),
-                          const SizedBox(width: 7),
-                          _legendDot(Colors.purple.shade800, '>12м яма'),
-                        ],
-                      ),
-                    ),
-                  ),
-                if (_settings.showHeatmap)
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 5,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _legendDot(Colors.amber, 'старый улов'),
-                          const SizedBox(width: 7),
-                          _legendDot(Colors.deepOrange, 'активно'),
-                          const SizedBox(width: 7),
-                          _legendDot(Colors.red, 'жор/трофей'),
-                        ],
-                      ),
-                    ),
-                  ),
                 Card(
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
@@ -1504,6 +1251,17 @@ class _MapPageState extends State<MapPage> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        if (activeMbtilesName != null)
+                          Text(
+                            'Офлайн-карта: $activeMbtilesName',
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(
+                                  color: Theme.of(context).colorScheme.primary,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
                         if (_isTracking) ...[
                           Text(
                             'Трек: ${formatDistance(_trackDistanceMeters)} • '
@@ -1643,21 +1401,4 @@ class _MapPageState extends State<MapPage> {
       ],
     );
   }
-}
-
-class _DepthDropSegment {
-  final LatLng from;
-  final LatLng to;
-  final double dropMeters;
-
-  const _DepthDropSegment({
-    required this.from,
-    required this.to,
-    required this.dropMeters,
-  });
-
-  LatLng get midpoint => LatLng(
-        (from.latitude + to.latitude) / 2.0,
-        (from.longitude + to.longitude) / 2.0,
-      );
 }
