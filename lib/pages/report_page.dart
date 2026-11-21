@@ -259,7 +259,9 @@ class _ReportPageState extends State<ReportPage> {
               style: Theme.of(context).textTheme.labelLarge,
             ),
             const SizedBox(height: 8),
-            if (_pickedPhotoBytes != null || hasLocalFile || existingUrl != null) ...[
+            if (_pickedPhotoBytes != null ||
+                hasLocalFile ||
+                existingUrl != null) ...[
               Stack(
                 children: [
                   ClipRRect(
@@ -274,7 +276,22 @@ class _ReportPageState extends State<ReportPage> {
                                   File(_pickedPhotoPath!),
                                   fit: BoxFit.cover,
                                 )
-                              : Image.network(existingUrl!, fit: BoxFit.cover),
+                              : Image.network(
+                                  existingUrl!,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, _, _) => Container(
+                                    color: Colors.black12,
+                                    alignment: Alignment.center,
+                                    child: const Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.broken_image_outlined),
+                                        SizedBox(height: 4),
+                                        Text('Фото недоступно офлайн'),
+                                      ],
+                                    ),
+                                  ),
+                                ),
                     ),
                   ),
                   Positioned(
