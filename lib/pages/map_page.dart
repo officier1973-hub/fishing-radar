@@ -12,6 +12,7 @@ import '../services/api_service.dart';
 import '../services/location_service.dart';
 import '../services/offline_map_service.dart';
 import '../services/track_service.dart';
+import '../services/waterway_service.dart';
 import '../services/weather_service.dart';
 import '../widgets/map_sheets.dart';
 import '../widgets/weather_sheet.dart';
@@ -43,6 +44,7 @@ class _MapPageState extends State<MapPage> {
   final TrackService _trackService = TrackService();
   final OfflineMapService _offlineService = OfflineMapService();
   final WeatherService _weatherService = WeatherService();
+  final WaterwayService _waterwayService = WaterwayService();
   final Distance _distanceCalc = const Distance();
 
   TileProvider? _activeMbtilesProvider;
@@ -61,6 +63,12 @@ class _MapPageState extends State<MapPage> {
 
   List<FishingSpot> _spots = [];
   MapLayerSettings _settings = const MapLayerSettings();
+
+  WaterwayOverlayData _waterwayData = WaterwayOverlayData.empty;
+  bool _isLoadingWaterways = false;
+  String? _waterwayStatus;
+  Timer? _waterwayDebounce;
+  int _waterwayRequestSeq = 0;
 
   final List<LatLng> _trackPoints = [];
   StreamSubscription<Position>? _trackSub;
@@ -146,6 +154,7 @@ class _MapPageState extends State<MapPage> {
     ApiService.backendReadyNotifier.removeListener(_onBackendReady);
     ApiService.pendingCountNotifier.removeListener(_onStatusChanged);
     ApiService.lastErrorNotifier.removeListener(_onStatusChanged);
+    _waterwayDebounce?.cancel();
     _trackSub?.cancel();
     _activeMbtilesProvider?.dispose();
     _overlayMbtilesProvider?.dispose();
@@ -179,6 +188,9 @@ class _MapPageState extends State<MapPage> {
         _safeMove(_currentCenter, 14);
       }
     } catch (_) {}
+    if (_settings.showSeamarks && _isMapReady) {
+      _refreshWaterways();
+    }
     await _loadSpots();
   }
 
@@ -202,9 +214,71 @@ class _MapPageState extends State<MapPage> {
   }
 
   void _updateSettings(MapLayerSettings next) {
+    final seamarksToggled = next.showSeamarks != _settings.showSeamarks;
     _syncMbtilesProviders(next);
     setState(() => _settings = next);
     _trackService.saveSettings(next);
+
+    if (seamarksToggled) {
+      if (next.showSeamarks) {
+        _refreshWaterways();
+      } else {
+        _waterwayDebounce?.cancel();
+        setState(() {
+          _waterwayData = WaterwayOverlayData.empty;
+          _isLoadingWaterways = false;
+          _waterwayStatus = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _refreshWaterways() async {
+    if (!_settings.showSeamarks || !_isMapReady) return;
+    if (_currentZoom < 9.0) {
+      if (!mounted) return;
+      setState(() {
+        _waterwayData = WaterwayOverlayData.empty;
+        _isLoadingWaterways = false;
+        _waterwayStatus = 'Фарватер: приблизьте карту (зум ≥ 9)';
+      });
+      return;
+    }
+
+    final bounds = _mapController.camera.visibleBounds;
+    final reqId = ++_waterwayRequestSeq;
+    if (mounted) {
+      setState(() {
+        _isLoadingWaterways = true;
+        _waterwayStatus = 'Фарватер: загрузка судового хода и знаков...';
+      });
+    }
+
+    try {
+      final data = await _waterwayService.fetchForBounds(bounds);
+      if (!mounted ||
+          reqId != _waterwayRequestSeq ||
+          !_settings.showSeamarks) {
+        return;
+      }
+      setState(() {
+        _waterwayData = data;
+        _isLoadingWaterways = false;
+        if (data.fairwayLines.isEmpty && data.marks.isEmpty) {
+          _waterwayStatus =
+              'Фарватер: в этом квадрате нет отмеченных знаков/хода';
+        } else {
+          _waterwayStatus =
+              'Фарватер: линий ${data.fairwayLines.length}, знаков/слипов ${data.marks.length}';
+        }
+      });
+    } catch (_) {
+      if (!mounted || reqId != _waterwayRequestSeq) return;
+      setState(() {
+        _isLoadingWaterways = false;
+        _waterwayStatus = 'Фарватер: ошибка загрузки данных';
+      });
+    }
   }
 
   void _cycleBaseMap() {
@@ -221,18 +295,7 @@ class _MapPageState extends State<MapPage> {
   }
 
   void _toggleSeamarks() {
-    final nextVal = !_settings.showSeamarks;
-    _updateSettings(_settings.copyWith(showSeamarks: nextVal));
-    if (nextVal && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          duration: Duration(seconds: 3),
-          content: Text(
-            'Водные знаки и фарватер включены (видны на судоходных реках при зуме 9–17)',
-          ),
-        ),
-      );
-    }
+    _updateSettings(_settings.copyWith(showSeamarks: !_settings.showSeamarks));
   }
 
   String _baseMapLabel() {
@@ -241,6 +304,83 @@ class _MapPageState extends State<MapPage> {
       BaseMapType.standard => 'Карта',
       BaseMapType.satellite => 'Спутник',
       BaseMapType.hybrid => 'Гибрид',
+    };
+  }
+
+  void _showWaterwayMarkDetails(WaterwayMark mark) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(_waterwayMarkIcon(mark.kind), size: 28),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      mark.title,
+                      style: Theme.of(ctx).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.bold,
+                          ),
+                    ),
+                  ),
+                ],
+              ),
+              if (mark.detail.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(mark.detail),
+              ],
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.navigation),
+                  label: const Text('Проложить курс сюда'),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    _setNavTarget(mark.point, mark.title);
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  IconData _waterwayMarkIcon(WaterwayMarkKind kind) {
+    return switch (kind) {
+      WaterwayMarkKind.buoy => Icons.change_history,
+      WaterwayMarkKind.beacon => Icons.light_mode,
+      WaterwayMarkKind.lock => Icons.water_damage,
+      WaterwayMarkKind.dam => Icons.warning_amber_rounded,
+      WaterwayMarkKind.slipway => Icons.directions_boat,
+      WaterwayMarkKind.other => Icons.anchor,
+    };
+  }
+
+  Color _waterwayMarkColor(WaterwayMark mark) {
+    final d = mark.detail.toLowerCase();
+    if (mark.kind == WaterwayMarkKind.buoy) {
+      if (d.contains('red') || d.contains('красн')) return Colors.red.shade700;
+      if (d.contains('green') || d.contains('зелен')) {
+        return Colors.green.shade700;
+      }
+      return Colors.amber.shade800;
+    }
+    return switch (mark.kind) {
+      WaterwayMarkKind.beacon => Colors.amber.shade800,
+      WaterwayMarkKind.lock => Colors.indigo.shade700,
+      WaterwayMarkKind.dam => Colors.deepOrange.shade700,
+      WaterwayMarkKind.slipway => Colors.teal.shade700,
+      _ => Colors.blueGrey.shade700,
     };
   }
 
@@ -865,8 +1005,6 @@ class _MapPageState extends State<MapPage> {
     }
 
     final activeMbtilesName = _activeMbtilesPathLoaded?.split('/').last;
-    final showZoomHintForSeamarks =
-        _settings.showSeamarks && _currentZoom < 9.0;
 
     return Scaffold(
       appBar: AppBar(
@@ -969,6 +1107,9 @@ class _MapPageState extends State<MapPage> {
                 if (_myPosition != null) {
                   _safeMove(_myPosition!, 14);
                 }
+                if (_settings.showSeamarks) {
+                  _refreshWaterways();
+                }
               },
               onTap: (_, point) {
                 if (_isRulerMode) {
@@ -981,14 +1122,18 @@ class _MapPageState extends State<MapPage> {
                 }
               },
               onPositionChanged: (camera, _) {
-                final wasBelow9 = _currentZoom < 9.0;
                 _currentCenter = camera.center;
                 _currentZoom = camera.zoom;
-                final isBelow9 = _currentZoom < 9.0;
                 final rotDiff = (camera.rotation - _mapRotationDeg).abs();
-                if (rotDiff > 1.0 ||
-                    (_settings.showSeamarks && wasBelow9 != isBelow9)) {
+                if (rotDiff > 1.0) {
                   setState(() => _mapRotationDeg = camera.rotation);
+                }
+                if (_settings.showSeamarks) {
+                  _waterwayDebounce?.cancel();
+                  _waterwayDebounce = Timer(
+                    const Duration(milliseconds: 650),
+                    _refreshWaterways,
+                  );
                 }
               },
             ),
@@ -1038,9 +1183,24 @@ class _MapPageState extends State<MapPage> {
                   key: ValueKey('seamarks-overlay-$_cacheEpoch'),
                   offlineService: _offlineService,
                   urlTemplate: OfflineMapService.seamarkUrlTemplate,
-                  fallbackUrl: OfflineMapService.seamarkFallbackUrlTemplate,
                   minNativeZoom: 9,
                   maxNativeZoom: 17,
+                ),
+              if (_settings.showSeamarks &&
+                  _waterwayData.fairwayLines.isNotEmpty)
+                PolylineLayer<Object>(
+                  polylines: _waterwayData.fairwayLines
+                      .map(
+                        (pts) => Polyline<Object>(
+                          points: pts,
+                          color: Colors.lightBlueAccent.shade700,
+                          strokeWidth: 3.0,
+                          pattern: StrokePattern.dashed(
+                            segments: const [10, 6],
+                          ),
+                        ),
+                      )
+                      .toList(),
                 ),
               if (_settings.ringPreset.radii.isNotEmpty)
                 CircleLayer<Object>(
@@ -1207,6 +1367,32 @@ class _MapPageState extends State<MapPage> {
                       ),
                     ),
                   ),
+                  if (_settings.showSeamarks)
+                    ..._waterwayData.marks.map(
+                      (mark) => Marker(
+                        point: mark.point,
+                        width: 28,
+                        height: 28,
+                        child: GestureDetector(
+                          onTap: () => _showWaterwayMarkDetails(mark),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.9),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: _waterwayMarkColor(mark),
+                                width: 1.5,
+                              ),
+                            ),
+                            child: Icon(
+                              _waterwayMarkIcon(mark.kind),
+                              color: _waterwayMarkColor(mark),
+                              size: 16,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   ...filteredSpots.map((spot) {
                     final pt = spot.displayPointFor(myId);
                     final color = _depthColor(spot.depthMeters);
@@ -1447,15 +1633,38 @@ class _MapPageState extends State<MapPage> {
                                   fontWeight: FontWeight.w600,
                                 ),
                           ),
-                        if (showZoomHintForSeamarks)
-                          Text(
-                            'Фарватер: приблизьте карту (зум ≥ 9)',
-                            style: Theme.of(context)
-                                .textTheme
-                                .labelSmall
-                                ?.copyWith(
-                                  color: Theme.of(context).colorScheme.primary,
+                        if (_waterwayStatus != null)
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (_isLoadingWaterways) ...[
+                                const SizedBox(
+                                  width: 11,
+                                  height: 11,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 1.8,
+                                  ),
                                 ),
+                                const SizedBox(width: 6),
+                              ],
+                              ConstrainedBox(
+                                constraints:
+                                    const BoxConstraints(maxWidth: 235),
+                                child: Text(
+                                  _waterwayStatus!,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .labelSmall
+                                      ?.copyWith(
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .primary,
+                                      ),
+                                ),
+                              ),
+                            ],
                           ),
                         if (_isTracking) ...[
                           Text(
