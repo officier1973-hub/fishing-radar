@@ -28,6 +28,15 @@ class MapPage extends StatefulWidget {
 }
 
 class _MapPageState extends State<MapPage> {
+  static const String _standardFallbackUrl =
+      'https://tile.openstreetmap.de/{z}/{x}/{y}.png';
+  static const String _satelliteFallbackUrl =
+      'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  static const String _hybridTransportFallbackUrl =
+      'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}';
+  static const String _hybridLabelsFallbackUrl =
+      'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
+
   final MapController _mapController = MapController();
   final ApiService _apiService = ApiService();
   final LocationService _locationService = LocationService();
@@ -36,11 +45,11 @@ class _MapPageState extends State<MapPage> {
   final WeatherService _weatherService = WeatherService();
   final Distance _distanceCalc = const Distance();
 
-  late TileProvider _onlineTileProvider;
   TileProvider? _activeMbtilesProvider;
   String? _activeMbtilesPathLoaded;
   TileProvider? _overlayMbtilesProvider;
   String? _overlayMbtilesPathLoaded;
+  int _cacheEpoch = 0;
 
   LatLng _currentCenter = const LatLng(53.2001, 50.1500);
   double _currentZoom = 13.0;
@@ -75,19 +84,10 @@ class _MapPageState extends State<MapPage> {
   @override
   void initState() {
     super.initState();
-    _onlineTileProvider = _createSafeOnlineProvider();
     ApiService.backendReadyNotifier.addListener(_onBackendReady);
     ApiService.pendingCountNotifier.addListener(_onStatusChanged);
     ApiService.lastErrorNotifier.addListener(_onStatusChanged);
     _initData();
-  }
-
-  TileProvider _createSafeOnlineProvider() {
-    try {
-      return _offlineService.createTileProvider();
-    } catch (_) {
-      return NetworkTileProvider();
-    }
   }
 
   void _syncMbtilesProviders(MapLayerSettings next) {
@@ -147,7 +147,6 @@ class _MapPageState extends State<MapPage> {
     ApiService.pendingCountNotifier.removeListener(_onStatusChanged);
     ApiService.lastErrorNotifier.removeListener(_onStatusChanged);
     _trackSub?.cancel();
-    _onlineTileProvider.dispose();
     _activeMbtilesProvider?.dispose();
     _overlayMbtilesProvider?.dispose();
     _mapController.dispose();
@@ -837,7 +836,6 @@ class _MapPageState extends State<MapPage> {
     final ringCenter = _myPosition ?? _currentCenter;
 
     final filteredSpots = _spots.where((s) {
-      if (!_settings.depthFilter.matches(s.depthMeters)) return false;
       if (_settings.onlyMySpots && !s.isOwnedBy(myId)) return false;
       if (_settings.fishFilter.isNotEmpty) {
         final q = _settings.fishFilter.toLowerCase();
@@ -849,6 +847,9 @@ class _MapPageState extends State<MapPage> {
     final baseUrl = _settings.baseMap == BaseMapType.standard
         ? OfflineMapService.standardUrlTemplate
         : OfflineMapService.satelliteUrlTemplate;
+    final baseFallbackUrl = _settings.baseMap == BaseMapType.standard
+        ? _standardFallbackUrl
+        : _satelliteFallbackUrl;
 
     final navOrigin = _myPosition ?? _currentCenter;
     double? navDistanceMeters;
@@ -917,11 +918,7 @@ class _MapPageState extends State<MapPage> {
               offlineService: _offlineService,
               currentSettings: _settings,
               onSettingsChanged: _updateSettings,
-              onCacheCleared: () {
-                final old = _onlineTileProvider;
-                setState(() => _onlineTileProvider = _createSafeOnlineProvider());
-                old.dispose();
-              },
+              onCacheCleared: () => setState(() => _cacheEpoch++),
             ),
           ),
           IconButton(
@@ -929,8 +926,7 @@ class _MapPageState extends State<MapPage> {
             icon: Badge(
               isLabelVisible: _settings.showSeamarks ||
                   _settings.onlyMySpots ||
-                  _settings.fishFilter.isNotEmpty ||
-                  _settings.depthFilter != DepthFilter.all,
+                  _settings.fishFilter.isNotEmpty,
               child: const Icon(Icons.layers),
             ),
             onPressed: () => showLayersSheet(
@@ -1004,26 +1000,29 @@ class _MapPageState extends State<MapPage> {
                   maxNativeZoom: 18,
                 )
               else ...[
-                TileLayer(
-                  key: ValueKey('online-base-${_settings.baseMap.name}'),
+                _ManagedOnlineTileLayer(
+                  key: ValueKey(
+                    'online-base-${_settings.baseMap.name}-$_cacheEpoch',
+                  ),
+                  offlineService: _offlineService,
                   urlTemplate: baseUrl,
-                  userAgentPackageName: 'ru.fishingradar.app',
-                  tileProvider: _onlineTileProvider,
-                  maxNativeZoom: 19,
+                  fallbackUrl: baseFallbackUrl,
+                  maxNativeZoom:
+                      _settings.baseMap == BaseMapType.standard ? 19 : 18,
                 ),
                 if (_settings.baseMap == BaseMapType.hybrid) ...[
-                  TileLayer(
-                    key: const ValueKey('online-hybrid-transport'),
+                  _ManagedOnlineTileLayer(
+                    key: ValueKey('online-hybrid-transport-$_cacheEpoch'),
+                    offlineService: _offlineService,
                     urlTemplate: OfflineMapService.hybridTransportUrlTemplate,
-                    userAgentPackageName: 'ru.fishingradar.app',
-                    tileProvider: _onlineTileProvider,
+                    fallbackUrl: _hybridTransportFallbackUrl,
                     maxNativeZoom: 18,
                   ),
-                  TileLayer(
-                    key: const ValueKey('online-hybrid-labels'),
+                  _ManagedOnlineTileLayer(
+                    key: ValueKey('online-hybrid-labels-$_cacheEpoch'),
+                    offlineService: _offlineService,
                     urlTemplate: OfflineMapService.hybridLabelsUrlTemplate,
-                    userAgentPackageName: 'ru.fishingradar.app',
-                    tileProvider: _onlineTileProvider,
+                    fallbackUrl: _hybridLabelsFallbackUrl,
                     maxNativeZoom: 18,
                   ),
                 ],
@@ -1035,12 +1034,11 @@ class _MapPageState extends State<MapPage> {
                   maxNativeZoom: 18,
                 ),
               if (_settings.showSeamarks)
-                TileLayer(
-                  key: const ValueKey('seamarks-overlay'),
+                _ManagedOnlineTileLayer(
+                  key: ValueKey('seamarks-overlay-$_cacheEpoch'),
+                  offlineService: _offlineService,
                   urlTemplate: OfflineMapService.seamarkUrlTemplate,
                   fallbackUrl: OfflineMapService.seamarkFallbackUrlTemplate,
-                  userAgentPackageName: 'ru.fishingradar.app',
-                  tileProvider: _onlineTileProvider,
                   minNativeZoom: 9,
                   maxNativeZoom: 17,
                 ),
@@ -1615,6 +1613,58 @@ class _MapPageState extends State<MapPage> {
         const SizedBox(width: 4),
         Text(label, style: const TextStyle(fontSize: 11)),
       ],
+    );
+  }
+}
+
+class _ManagedOnlineTileLayer extends StatefulWidget {
+  final OfflineMapService offlineService;
+  final String urlTemplate;
+  final String? fallbackUrl;
+  final int minNativeZoom;
+  final int maxNativeZoom;
+
+  const _ManagedOnlineTileLayer({
+    super.key,
+    required this.offlineService,
+    required this.urlTemplate,
+    this.fallbackUrl,
+    this.minNativeZoom = 0,
+    this.maxNativeZoom = 19,
+  });
+
+  @override
+  State<_ManagedOnlineTileLayer> createState() =>
+      _ManagedOnlineTileLayerState();
+}
+
+class _ManagedOnlineTileLayerState extends State<_ManagedOnlineTileLayer> {
+  late final TileProvider _tileProvider;
+
+  @override
+  void initState() {
+    super.initState();
+    _tileProvider = _createProvider();
+  }
+
+  TileProvider _createProvider() {
+    try {
+      return widget.offlineService.createTileProvider();
+    } catch (_) {
+      return NetworkTileProvider();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TileLayer(
+      urlTemplate: widget.urlTemplate,
+      fallbackUrl: widget.fallbackUrl,
+      userAgentPackageName: 'ru.fishingradar.app',
+      tileProvider: _tileProvider,
+      minNativeZoom: widget.minNativeZoom,
+      maxNativeZoom: widget.maxNativeZoom,
+      evictErrorTileStrategy: EvictErrorTileStrategy.dispose,
     );
   }
 }
