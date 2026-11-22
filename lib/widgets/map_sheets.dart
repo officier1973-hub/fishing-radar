@@ -93,24 +93,35 @@ Future<void> showLayersSheet({
                     style: Theme.of(ctx).textTheme.labelLarge,
                   ),
                   const SizedBox(height: 8),
-                  SegmentedButton<BaseMapType>(
-                    segments: const [
-                      ButtonSegment(
-                        value: BaseMapType.standard,
-                        icon: Icon(Icons.map),
-                        label: Text('Карта'),
+                  SizedBox(
+                    width: double.infinity,
+                    child: SegmentedButton<BaseMapType>(
+                      style: SegmentedButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
                       ),
-                      ButtonSegment(
-                        value: BaseMapType.satellite,
-                        icon: Icon(Icons.satellite_alt),
-                        label: Text('Спутник'),
-                      ),
-                    ],
-                    selected: {local.baseMap},
-                    onSelectionChanged: (s) => update(
-                      local.copyWith(
-                        baseMap: s.first,
-                        clearActiveMbtiles: true,
+                      segments: const [
+                        ButtonSegment(
+                          value: BaseMapType.standard,
+                          icon: Icon(Icons.map, size: 18),
+                          label: Text('Карта'),
+                        ),
+                        ButtonSegment(
+                          value: BaseMapType.satellite,
+                          icon: Icon(Icons.satellite_alt, size: 18),
+                          label: Text('Спутник'),
+                        ),
+                        ButtonSegment(
+                          value: BaseMapType.hybrid,
+                          icon: Icon(Icons.layers, size: 18),
+                          label: Text('Гибрид'),
+                        ),
+                      ],
+                      selected: {local.baseMap},
+                      onSelectionChanged: (s) => update(
+                        local.copyWith(
+                          baseMap: s.first,
+                          clearActiveMbtiles: true,
+                        ),
                       ),
                     ),
                   ),
@@ -131,7 +142,9 @@ Future<void> showLayersSheet({
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Водные знаки и фарватер'),
-                    subtitle: const Text('Бакены, створы и судовой ход'),
+                    subtitle: const Text(
+                      'Бакены, створы и судовой ход (на судоходных реках при зуме 9–17)',
+                    ),
                     value: local.showSeamarks,
                     onChanged: (v) => update(local.copyWith(showSeamarks: v)),
                   ),
@@ -398,7 +411,8 @@ Future<void> showOfflineCacheSheet({
                                           TextField(
                                             controller: urlCtrl,
                                             decoration: const InputDecoration(
-                                              labelText: 'Прямая ссылка (https://...)',
+                                              labelText:
+                                                  'Прямая ссылка (https://...)',
                                               border: OutlineInputBorder(),
                                             ),
                                           ),
@@ -430,7 +444,9 @@ Future<void> showOfflineCacheSheet({
                                   final name = nameCtrl.text.trim();
                                   urlCtrl.dispose();
                                   nameCtrl.dispose();
-                                  if (ok == true && url.isNotEmpty && ctx.mounted) {
+                                  if (ok == true &&
+                                      url.isNotEmpty &&
+                                      ctx.mounted) {
                                     await startUrlDownload(
                                       setSheetState,
                                       url,
@@ -520,7 +536,8 @@ Future<void> showOfflineCacheSheet({
                                   children: [
                                     Row(
                                       children: [
-                                        const Icon(Icons.map_outlined, size: 20),
+                                        const Icon(Icons.map_outlined,
+                                            size: 20),
                                         const SizedBox(width: 8),
                                         Expanded(
                                           child: Text(
@@ -554,7 +571,8 @@ Future<void> showOfflineCacheSheet({
                                                     );
                                                   }
                                                   if (!ctx.mounted) return;
-                                                  setSheetState(() => reloadTick++);
+                                                  setSheetState(
+                                                      () => reloadTick++);
                                                 },
                                         ),
                                       ],
@@ -614,7 +632,8 @@ Future<void> showOfflineCacheSheet({
                           ...cloudFiles.map((cf) {
                             return ListTile(
                               contentPadding: EdgeInsets.zero,
-                              leading: const Icon(Icons.cloud_download_outlined),
+                              leading:
+                                  const Icon(Icons.cloud_download_outlined),
                               title: Text(cf.name),
                               subtitle: cf.sizeBytes > 0
                                   ? Text(
@@ -712,12 +731,13 @@ Future<void> showSavedTracksSheet({
                         child: ListView.separated(
                           shrinkWrap: true,
                           itemCount: tracks.length,
-                          separatorBuilder: (_, __) => const Divider(height: 1),
+                          separatorBuilder: (_, _) => const Divider(height: 1),
                           itemBuilder: (_, index) {
                             final track = tracks[index];
-                            final isSelected = activeLoadedTrack?.id == track.id;
-                            final date = DateFormat('dd.MM HH:mm')
-                                .format(track.startedAt);
+                            final isSelected =
+                                activeLoadedTrack?.id == track.id;
+                            final date =
+                                DateFormat('dd.MM HH:mm').format(track.startedAt);
                             return ListTile(
                               leading: Icon(
                                 Icons.route,
