@@ -248,34 +248,58 @@ class _AuthPageState extends State<AuthPage> {
                         'Мой код для друзей',
                         style: TextStyle(fontWeight: FontWeight.w600),
                       ),
-                      const SizedBox(height: 6),
+                      const SizedBox(height: 8),
                       if (_loadingCircle && _myTrustCode == null)
                         const LinearProgressIndicator()
                       else
-                        Row(
-                          children: [
-                            Expanded(
-                              child: SelectableText(
-                                _myTrustCode ?? 'Не удалось получить',
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleLarge
-                                    ?.copyWith(letterSpacing: 1.5),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  alignment: Alignment.centerLeft,
+                                  child: SelectableText(
+                                    _myTrustCode ?? 'Не удалось получить',
+                                    maxLines: 1,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleLarge
+                                        ?.copyWith(
+                                          letterSpacing: 1.5,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                  ),
+                                ),
                               ),
-                            ),
-                            IconButton(
-                              tooltip: 'Обновить',
-                              onPressed:
-                                  _loadingCircle ? null : _loadTrustCircle,
-                              icon: const Icon(Icons.refresh),
-                            ),
-                            FilledButton.tonalIcon(
-                              onPressed:
-                                  _myTrustCode == null ? null : _copyMyCode,
-                              icon: const Icon(Icons.copy, size: 18),
-                              label: const Text('Копировать'),
-                            ),
-                          ],
+                              const SizedBox(width: 6),
+                              IconButton(
+                                visualDensity: VisualDensity.compact,
+                                tooltip: 'Обновить код',
+                                onPressed:
+                                    _loadingCircle ? null : _loadTrustCircle,
+                                icon: const Icon(Icons.refresh),
+                              ),
+                              IconButton.filledTonal(
+                                visualDensity: VisualDensity.compact,
+                                tooltip: 'Копировать код',
+                                onPressed:
+                                    _myTrustCode == null ? null : _copyMyCode,
+                                icon: const Icon(Icons.copy, size: 18),
+                              ),
+                            ],
+                          ),
                         ),
                       const Divider(height: 24),
                       Row(
