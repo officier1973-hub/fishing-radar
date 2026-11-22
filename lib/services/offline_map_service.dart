@@ -36,8 +36,14 @@ class OfflineMapService {
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
   static const String satelliteUrlTemplate =
       'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  static const String hybridTransportUrlTemplate =
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}';
+  static const String hybridLabelsUrlTemplate =
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
   static const String seamarkUrlTemplate =
       'https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png';
+  static const String seamarkFallbackUrlTemplate =
+      'https://t1.openseamap.org/seamark/{z}/{x}/{y}.png';
 
   BuiltInMapCachingProvider _cachingProvider =
       BuiltInMapCachingProvider.getOrCreateInstance(
@@ -150,7 +156,8 @@ class OfflineMapService {
       throw const FormatException('Некорректная ссылка на файл');
     }
 
-    final cleanName = fileName.trim().isEmpty ? 'region.mbtiles' : fileName.trim();
+    final cleanName =
+        fileName.trim().isEmpty ? 'region.mbtiles' : fileName.trim();
     final finalName = cleanName.toLowerCase().endsWith('.mbtiles')
         ? cleanName
         : '$cleanName.mbtiles';
