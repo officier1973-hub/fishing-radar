@@ -112,9 +112,16 @@ class OfflineMapService {
   }
 
   Future<LocalMbtilesInfo> importPickedMbtiles(PlatformFile picked) async {
-    final rawName = picked.name.trim();
-    if (!rawName.toLowerCase().endsWith('.mbtiles')) {
-      throw const FormatException('Выберите файл с расширением .mbtiles');
+    var rawName = picked.name.trim();
+    if (rawName.isEmpty) {
+      rawName = 'imported_${DateTime.now().millisecondsSinceEpoch}.mbtiles';
+    }
+    final lower = rawName.toLowerCase();
+    if (!lower.endsWith('.mbtiles')) {
+      if (rawName.contains('.')) {
+        throw FormatException('Выберите файл .mbtiles (выбран: $rawName)');
+      }
+      rawName = '$rawName.mbtiles';
     }
 
     final dir = await _getMbtilesDir();
@@ -122,12 +129,26 @@ class OfflineMapService {
     final destPath = '${dir.path}/$safeName';
     final destFile = File(destPath);
 
-    if (picked.path != null && picked.path!.isNotEmpty) {
-      final src = File(picked.path!);
-      await src.copy(destPath);
-    } else {
-      final bytes = await picked.readAsBytes();
-      await destFile.writeAsBytes(bytes, flush: true);
+    try {
+      final localPath = picked.path;
+      if (localPath != null &&
+          localPath.isNotEmpty &&
+          File(localPath).existsSync()) {
+        await File(localPath).openRead().pipe(destFile.openWrite());
+      } else {
+        final sink = destFile.openWrite();
+        try {
+          await for (final chunk in picked.readAsByteStream()) {
+            sink.add(chunk);
+          }
+          await sink.flush();
+        } finally {
+          await sink.close();
+        }
+      }
+    } catch (e) {
+      if (await destFile.exists()) await destFile.delete();
+      throw FormatException('Не удалось прочитать файл с устройства: $e');
     }
 
     try {
@@ -266,15 +287,40 @@ class OfflineMapService {
   }
 
   void _validateMbtilesFile(String path) {
-    final db = MbTiles(path: path);
+    final file = File(path);
+    if (!file.existsSync() || file.lengthSync() < 16) {
+      throw const FormatException('Файл пустой или слишком мал для .mbtiles');
+    }
+
+    final raf = file.openSync(mode: FileMode.read);
     try {
-      db.getMetadata();
-    } catch (_) {
-      throw const FormatException(
-        'Файл повреждён или не является корректной базой .mbtiles',
-      );
+      final headerBytes = raf.readSync(15);
+      final headerText = String.fromCharCodes(headerBytes);
+      if (headerText != 'SQLite format 3') {
+        throw const FormatException(
+          'Файл не является базой SQLite .mbtiles (возможно, это архив или HTML)',
+        );
+      }
     } finally {
-      db.close();
+      raf.closeSync();
+    }
+
+    MbTiles? db;
+    try {
+      db = MbTiles(path: path);
+      try {
+        db.getMetadata();
+      } catch (_) {
+        // Некоторые экспорты (SAS.Planet / MobAC) имеют нестандартную metadata,
+        // поэтому проверяем читаемость таблицы тайлов напрямую.
+        db.getTile(z: 0, x: 0, y: 0);
+      }
+    } catch (e) {
+      throw FormatException('Не удалось открыть .mbtiles: $e');
+    } finally {
+      try {
+        db?.close();
+      } catch (_) {}
     }
   }
 }
