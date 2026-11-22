@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/boat_track.dart';
 
-enum BaseMapType { standard, satellite }
+enum BaseMapType { standard, satellite, hybrid }
 
 enum RingPreset {
   off('Выкл', []),
@@ -128,12 +128,15 @@ class TrackService {
     final ringIdx = (map['ring_preset'] as num?)?.toInt() ?? 2;
     final depthIdx = (map['depth_filter'] as num?)?.toInt() ?? 0;
     return MapLayerSettings(
-      baseMap: BaseMapType.values[baseIdx.clamp(0, BaseMapType.values.length - 1)],
+      baseMap:
+          BaseMapType.values[baseIdx.clamp(0, BaseMapType.values.length - 1)],
       showSeamarks: map['show_seamarks'] == true,
       onlyMySpots: map['only_my_spots'] == true,
       fishFilter: (map['fish_filter'] ?? '').toString(),
-      ringPreset: RingPreset.values[ringIdx.clamp(0, RingPreset.values.length - 1)],
-      depthFilter: DepthFilter.values[depthIdx.clamp(0, DepthFilter.values.length - 1)],
+      ringPreset:
+          RingPreset.values[ringIdx.clamp(0, RingPreset.values.length - 1)],
+      depthFilter:
+          DepthFilter.values[depthIdx.clamp(0, DepthFilter.values.length - 1)],
       activeMbtilesPath: map['active_mbtiles_path']?.toString(),
       overlayMbtilesPath: map['overlay_mbtiles_path']?.toString(),
     );
