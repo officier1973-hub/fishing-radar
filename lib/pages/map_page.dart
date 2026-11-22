@@ -208,6 +208,43 @@ class _MapPageState extends State<MapPage> {
     _trackService.saveSettings(next);
   }
 
+  void _cycleBaseMap() {
+    if (_activeMbtilesProvider != null) {
+      _updateSettings(_settings.copyWith(clearActiveMbtiles: true));
+      return;
+    }
+    final nextMode = switch (_settings.baseMap) {
+      BaseMapType.standard => BaseMapType.satellite,
+      BaseMapType.satellite => BaseMapType.hybrid,
+      BaseMapType.hybrid => BaseMapType.standard,
+    };
+    _updateSettings(_settings.copyWith(baseMap: nextMode));
+  }
+
+  void _toggleSeamarks() {
+    final nextVal = !_settings.showSeamarks;
+    _updateSettings(_settings.copyWith(showSeamarks: nextVal));
+    if (nextVal && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          duration: Duration(seconds: 3),
+          content: Text(
+            'Водные знаки и фарватер включены (видны на судоходных реках при зуме 9–17)',
+          ),
+        ),
+      );
+    }
+  }
+
+  String _baseMapLabel() {
+    if (_activeMbtilesProvider != null) return 'Офлайн';
+    return switch (_settings.baseMap) {
+      BaseMapType.standard => 'Карта',
+      BaseMapType.satellite => 'Спутник',
+      BaseMapType.hybrid => 'Гибрид',
+    };
+  }
+
   void _openWeatherSheet(LatLng point, {String? title}) {
     showWeatherAndBiteSheet(
       context: context,
@@ -809,9 +846,9 @@ class _MapPageState extends State<MapPage> {
       return true;
     }).toList();
 
-    final baseUrl = _settings.baseMap == BaseMapType.satellite
-        ? OfflineMapService.satelliteUrlTemplate
-        : OfflineMapService.standardUrlTemplate;
+    final baseUrl = _settings.baseMap == BaseMapType.standard
+        ? OfflineMapService.standardUrlTemplate
+        : OfflineMapService.satelliteUrlTemplate;
 
     final navOrigin = _myPosition ?? _currentCenter;
     double? navDistanceMeters;
@@ -827,6 +864,8 @@ class _MapPageState extends State<MapPage> {
     }
 
     final activeMbtilesName = _activeMbtilesPathLoaded?.split('/').last;
+    final showZoomHintForSeamarks =
+        _settings.showSeamarks && _currentZoom < 9.0;
 
     return Scaffold(
       appBar: AppBar(
@@ -887,7 +926,13 @@ class _MapPageState extends State<MapPage> {
           ),
           IconButton(
             tooltip: 'Слои и фильтры',
-            icon: const Icon(Icons.layers),
+            icon: Badge(
+              isLabelVisible: _settings.showSeamarks ||
+                  _settings.onlyMySpots ||
+                  _settings.fishFilter.isNotEmpty ||
+                  _settings.depthFilter != DepthFilter.all,
+              child: const Icon(Icons.layers),
+            ),
             onPressed: () => showLayersSheet(
               context: context,
               current: _settings,
@@ -940,10 +985,13 @@ class _MapPageState extends State<MapPage> {
                 }
               },
               onPositionChanged: (camera, _) {
+                final wasBelow9 = _currentZoom < 9.0;
                 _currentCenter = camera.center;
                 _currentZoom = camera.zoom;
+                final isBelow9 = _currentZoom < 9.0;
                 final rotDiff = (camera.rotation - _mapRotationDeg).abs();
-                if (rotDiff > 1.0) {
+                if (rotDiff > 1.0 ||
+                    (_settings.showSeamarks && wasBelow9 != isBelow9)) {
                   setState(() => _mapRotationDeg = camera.rotation);
                 }
               },
@@ -955,7 +1003,7 @@ class _MapPageState extends State<MapPage> {
                   tileProvider: _activeMbtilesProvider!,
                   maxNativeZoom: 18,
                 )
-              else
+              else ...[
                 TileLayer(
                   key: ValueKey('online-base-${_settings.baseMap.name}'),
                   urlTemplate: baseUrl,
@@ -963,6 +1011,23 @@ class _MapPageState extends State<MapPage> {
                   tileProvider: _onlineTileProvider,
                   maxNativeZoom: 19,
                 ),
+                if (_settings.baseMap == BaseMapType.hybrid) ...[
+                  TileLayer(
+                    key: const ValueKey('online-hybrid-transport'),
+                    urlTemplate: OfflineMapService.hybridTransportUrlTemplate,
+                    userAgentPackageName: 'ru.fishingradar.app',
+                    tileProvider: _onlineTileProvider,
+                    maxNativeZoom: 18,
+                  ),
+                  TileLayer(
+                    key: const ValueKey('online-hybrid-labels'),
+                    urlTemplate: OfflineMapService.hybridLabelsUrlTemplate,
+                    userAgentPackageName: 'ru.fishingradar.app',
+                    tileProvider: _onlineTileProvider,
+                    maxNativeZoom: 18,
+                  ),
+                ],
+              ],
               if (_overlayMbtilesProvider != null)
                 TileLayer(
                   key: ValueKey('mbtiles-overlay-$_overlayMbtilesPathLoaded'),
@@ -971,10 +1036,13 @@ class _MapPageState extends State<MapPage> {
                 ),
               if (_settings.showSeamarks)
                 TileLayer(
+                  key: const ValueKey('seamarks-overlay'),
                   urlTemplate: OfflineMapService.seamarkUrlTemplate,
+                  fallbackUrl: OfflineMapService.seamarkFallbackUrlTemplate,
                   userAgentPackageName: 'ru.fishingradar.app',
                   tileProvider: _onlineTileProvider,
-                  maxNativeZoom: 18,
+                  minNativeZoom: 9,
+                  maxNativeZoom: 17,
                 ),
               if (_settings.ringPreset.radii.isNotEmpty)
                 CircleLayer<Object>(
@@ -1312,6 +1380,34 @@ class _MapPageState extends State<MapPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    ActionChip(
+                      visualDensity: VisualDensity.compact,
+                      avatar: Icon(
+                        _activeMbtilesProvider != null
+                            ? Icons.offline_pin
+                            : _settings.baseMap == BaseMapType.hybrid
+                                ? Icons.layers
+                                : _settings.baseMap == BaseMapType.satellite
+                                    ? Icons.satellite_alt
+                                    : Icons.map,
+                        size: 16,
+                      ),
+                      label: Text(_baseMapLabel()),
+                      onPressed: _cycleBaseMap,
+                    ),
+                    FilterChip(
+                      visualDensity: VisualDensity.compact,
+                      avatar: const Icon(Icons.anchor, size: 16),
+                      label: const Text('Фарватер'),
+                      selected: _settings.showSeamarks,
+                      onSelected: (_) => _toggleSeamarks(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
                 Card(
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
@@ -1351,6 +1447,16 @@ class _MapPageState extends State<MapPage> {
                                 ?.copyWith(
                                   color: Theme.of(context).colorScheme.primary,
                                   fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                        if (showZoomHintForSeamarks)
+                          Text(
+                            'Фарватер: приблизьте карту (зум ≥ 9)',
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(
+                                  color: Theme.of(context).colorScheme.primary,
                                 ),
                           ),
                         if (_isTracking) ...[
