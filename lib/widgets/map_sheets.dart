@@ -96,24 +96,35 @@ Future<void> showLayersSheet({
                   SizedBox(
                     width: double.infinity,
                     child: SegmentedButton<BaseMapType>(
+                      showSelectedIcon: false,
                       style: SegmentedButton.styleFrom(
                         visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
                       ),
                       segments: const [
                         ButtonSegment(
                           value: BaseMapType.standard,
-                          icon: Icon(Icons.map, size: 18),
-                          label: Text('Карта'),
+                          icon: Icon(Icons.map, size: 17),
+                          label: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text('Карта', maxLines: 1),
+                          ),
                         ),
                         ButtonSegment(
                           value: BaseMapType.satellite,
-                          icon: Icon(Icons.satellite_alt, size: 18),
-                          label: Text('Спутник'),
+                          icon: Icon(Icons.satellite_alt, size: 17),
+                          label: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text('Спутник', maxLines: 1),
+                          ),
                         ),
                         ButtonSegment(
                           value: BaseMapType.hybrid,
-                          icon: Icon(Icons.layers, size: 18),
-                          label: Text('Гибрид'),
+                          icon: Icon(Icons.layers, size: 17),
+                          label: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text('Гибрид', maxLines: 1),
+                          ),
                         ),
                       ],
                       selected: {local.baseMap},
@@ -170,24 +181,6 @@ Future<void> showLayersSheet({
                         selected: local.ringPreset == preset,
                         onSelected: (_) =>
                             update(local.copyWith(ringPreset: preset)),
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 14),
-                  Text(
-                    'Фильтр по глубине',
-                    style: Theme.of(ctx).textTheme.labelLarge,
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 6,
-                    children: DepthFilter.values.map((filter) {
-                      return ChoiceChip(
-                        label: Text(filter.label),
-                        selected: local.depthFilter == filter,
-                        onSelected: (_) =>
-                            update(local.copyWith(depthFilter: filter)),
                       );
                     }).toList(),
                   ),
