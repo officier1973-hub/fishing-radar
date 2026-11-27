@@ -23,18 +23,33 @@ jobs:
             exit 1
           fi
 
-          BASE_URL="${SUPABASE_URL%/}"
+          read -r BASE_URL CLEAN_KEY ORIG_PATH < <(python3 - <<'PY'
+          import os
+          from urllib.parse import urlparse
+
+          raw_url = os.environ["SUPABASE_URL"].strip().strip('"').strip("'")
+          raw_key = os.environ["SUPABASE_KEY"].strip().strip('"').strip("'")
+          if "://" not in raw_url:
+              raw_url = "https://" + raw_url
+          parsed = urlparse(raw_url)
+          origin = f"{parsed.scheme}://{parsed.netloc}"
+          orig_path = parsed.path if parsed.path else "/"
+          print(origin, raw_key, orig_path)
+          PY
+          )
+
+          echo "Secret SUPABASE_URL path: $ORIG_PATH"
           ENDPOINT="${BASE_URL}/rest/v1/fishing_spots?select=id&limit=1"
 
-          if [[ "$SUPABASE_KEY" == eyJ* ]]; then
+          if [[ "$CLEAN_KEY" == eyJ* ]]; then
             HTTP_CODE=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
-              -H "apikey: ${SUPABASE_KEY}" \
-              -H "Authorization: Bearer ${SUPABASE_KEY}" \
+              -H "apikey: ${CLEAN_KEY}" \
+              -H "Authorization: Bearer ${CLEAN_KEY}" \
               -H "Accept: application/json" \
               "$ENDPOINT")
           else
             HTTP_CODE=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
-              -H "apikey: ${SUPABASE_KEY}" \
+              -H "apikey: ${CLEAN_KEY}" \
               -H "Accept: application/json" \
               "$ENDPOINT")
           fi
