@@ -105,6 +105,35 @@ class TrackService {
     await _persistTracks(current);
   }
 
+  /// Пакетный импорт треков (с защитой от дубликатов при повторном импорте GPX).
+  /// Возвращает количество добавленных треков.
+  Future<int> saveTracksBatch(List<BoatTrack> incoming) async {
+    if (incoming.isEmpty) return 0;
+    final current = await loadTracks();
+    var added = 0;
+
+    for (final track in incoming.reversed) {
+      final duplicate = current.any((existing) {
+        if (existing.id == track.id) return true;
+        final sameName = existing.name.trim().toLowerCase() ==
+            track.name.trim().toLowerCase();
+        final sameCount = existing.points.length == track.points.length;
+        final closeStart =
+            existing.startedAt.difference(track.startedAt).inSeconds.abs() <= 5;
+        return sameName && sameCount && closeStart;
+      });
+      if (!duplicate) {
+        current.insert(0, track);
+        added++;
+      }
+    }
+
+    if (added > 0) {
+      await _persistTracks(current);
+    }
+    return added;
+  }
+
   Future<void> deleteTrack(String id) async {
     final current = await loadTracks();
     current.removeWhere((t) => t.id == id);
