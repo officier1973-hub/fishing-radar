@@ -14,6 +14,14 @@ enum WaterwayMarkKind {
   other,
 }
 
+class WaterwayLoadException implements Exception {
+  final String summary;
+  const WaterwayLoadException(this.summary);
+
+  @override
+  String toString() => summary;
+}
+
 class WaterwayMark {
   final LatLng point;
   final WaterwayMarkKind kind;
@@ -117,17 +125,26 @@ class WaterwayOverlayData {
 }
 
 class WaterwayService {
-  static const List<String> _endpoints = [
-    'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-    'https://overpass.private.coffee/api/interpreter',
-    'https://overpass-api.de/api/interpreter',
+  static const List<({String tag, String url})> _endpoints = [
+    (tag: 'coffee', url: 'https://overpass.private.coffee/api/interpreter'),
+    (tag: 'fr', url: 'https://overpass.openstreetmap.fr/api/interpreter'),
+    (tag: 'z', url: 'https://z.overpass-api.de/api/interpreter'),
+    (tag: 'lz4', url: 'https://lz4.overpass-api.de/api/interpreter'),
+    (tag: 'de', url: 'https://overpass-api.de/api/interpreter'),
+    (
+      tag: 'mail',
+      url: 'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+    ),
   ];
 
   static const String _diskCachePrefix = 'waterway_cache_v1_';
   static const String _diskKeysIndexKey = 'waterway_cache_keys_v1';
   static const Duration _diskCacheTtl = Duration(days: 7);
+  static const Duration _endpointCooldown = Duration(minutes: 2);
 
   final Map<String, WaterwayOverlayData> _memoryCache = {};
+  final Map<String, DateTime> _cooldownUntil = {};
+  String? _lastWorkingTag;
 
   Future<WaterwayOverlayData> fetchForBounds(LatLngBounds bounds) async {
     final s = bounds.south;
@@ -137,8 +154,8 @@ class WaterwayService {
 
     final centerLat = (s + n) / 2.0;
     final centerLon = (w + e) / 2.0;
-    final halfLat = ((n - s) / 2.0).clamp(0.01, 0.22);
-    final halfLon = ((e - w) / 2.0).clamp(0.01, 0.30);
+    final halfLat = ((n - s) / 2.0).clamp(0.01, 0.16);
+    final halfLon = ((e - w) / 2.0).clamp(0.01, 0.22);
 
     final qSouth = centerLat - halfLat;
     final qNorth = centerLat + halfLat;
@@ -168,23 +185,44 @@ class WaterwayService {
         '${qSouth.toStringAsFixed(4)},${qWest.toStringAsFixed(4)},'
         '${qNorth.toStringAsFixed(4)},${qEast.toStringAsFixed(4)}';
 
-    final query = '[out:json][timeout:12][maxsize:16777216];'
+    final query = '[out:json][timeout:18];'
         '('
         'way["waterway"="fairway"]($bbox);'
         'node["seamark:type"]($bbox);'
-        'node["waterway"~"^(lock_gate|dam|weir)\$"]($bbox);'
+        'node["waterway"="lock_gate"]($bbox);'
+        'node["waterway"="dam"]($bbox);'
+        'node["waterway"="weir"]($bbox);'
         'node["leisure"="slipway"]($bbox);'
         ');'
         'out geom;';
 
-    Object? lastErr;
-    for (final endpoint in _endpoints) {
+    final now = DateTime.now();
+    final ordered = List<({String tag, String url})>.from(_endpoints);
+    if (_lastWorkingTag != null) {
+      ordered.sort((a, b) {
+        if (a.tag == _lastWorkingTag) return -1;
+        if (b.tag == _lastWorkingTag) return 1;
+        return 0;
+      });
+    }
+
+    var activeEndpoints = ordered.where((ep) {
+      final until = _cooldownUntil[ep.tag];
+      return until == null || !now.isBefore(until);
+    }).toList();
+    if (activeEndpoints.isEmpty) {
+      _cooldownUntil.clear();
+      activeEndpoints = ordered;
+    }
+
+    final errors = <String>[];
+    for (final ep in activeEndpoints) {
       final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 8);
+        ..connectionTimeout = const Duration(seconds: 6);
       try {
-        final uri = Uri.parse(endpoint);
+        final uri = Uri.parse(ep.url);
         final req = await client.postUrl(uri).timeout(
-              const Duration(seconds: 10),
+              const Duration(seconds: 8),
             );
         req.headers.set(
           'User-Agent',
@@ -201,7 +239,7 @@ class WaterwayService {
         req.contentLength = bodyBytes.length;
         req.add(bodyBytes);
 
-        final res = await req.close().timeout(const Duration(seconds: 14));
+        final res = await req.close().timeout(const Duration(seconds: 18));
         final raw = await res
             .transform(utf8.decoder)
             .join()
@@ -223,11 +261,14 @@ class WaterwayService {
         }
 
         final parsed = _parseResponse(decodedAny);
+        _lastWorkingTag = ep.tag;
+        _cooldownUntil.remove(ep.tag);
         _putMemoryCache(cacheKey, parsed);
         await _saveToDiskCache(cacheKey, parsed);
         return parsed;
       } catch (err) {
-        lastErr = err;
+        _cooldownUntil[ep.tag] = DateTime.now().add(_endpointCooldown);
+        errors.add('${ep.tag}:${_shortErrTag(err)}');
       } finally {
         client.close(force: true);
       }
@@ -238,10 +279,17 @@ class WaterwayService {
       return diskEntry.data;
     }
 
-    if (lastErr != null) {
-      throw lastErr;
+    throw WaterwayLoadException(errors.take(4).join(', '));
+  }
+
+  String _shortErrTag(Object err) {
+    if (err is HttpException) {
+      return err.message.replaceFirst('HTTP ', '');
     }
-    return WaterwayOverlayData.empty;
+    if (err is TimeoutException) return 'таймаут';
+    if (err is SocketException) return 'сеть';
+    if (err is FormatException) return 'формат';
+    return 'сбой';
   }
 
   void _putMemoryCache(String key, WaterwayOverlayData data) {
