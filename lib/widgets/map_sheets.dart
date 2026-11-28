@@ -2,6 +2,9 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/boat_track.dart';
+import '../models/fishing_spot.dart';
+import '../services/api_service.dart';
+import '../services/gpx_service.dart';
 import '../services/offline_map_service.dart';
 import '../services/track_service.dart';
 
@@ -23,6 +26,7 @@ Future<void> showLayersSheet({
   required BuildContext context,
   required MapLayerSettings current,
   required ValueChanged<MapLayerSettings> onChanged,
+  VoidCallback? onOpenGpx,
 }) {
   const popularFish = ['', 'Судак', 'Щука', 'Окунь', 'Лещ', 'Карп'];
 
@@ -204,6 +208,23 @@ Future<void> showLayersSheet({
                       );
                     }).toList(),
                   ),
+                  if (onOpenGpx != null) ...[
+                    const SizedBox(height: 12),
+                    const Divider(),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.import_export),
+                      title: const Text('Экспорт и импорт GPX'),
+                      subtitle: const Text(
+                        'Выгрузка и загрузка треков и точек клёва в .gpx',
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {
+                        Navigator.of(ctx).pop();
+                        onOpenGpx();
+                      },
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -664,14 +685,17 @@ Future<void> showOfflineCacheSheet({
 Future<void> showSavedTracksSheet({
   required BuildContext context,
   required TrackService trackService,
+  required GpxService gpxService,
   required BoatTrack? activeLoadedTrack,
   required ValueChanged<BoatTrack?> onSelectTrack,
+  VoidCallback? onOpenGpxSheet,
 }) {
   return showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
     isScrollControlled: true,
     builder: (ctx) {
+      String? statusMessage;
       return StatefulBuilder(
         builder: (ctx, setSheetState) {
           return SafeArea(
@@ -698,6 +722,30 @@ Future<void> showSavedTracksSheet({
                         ),
                     ],
                   ),
+                  if (onOpenGpxSheet != null) ...[
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.import_export),
+                        label: const Text('Экспорт / импорт GPX (треки и точки)'),
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          onOpenGpxSheet();
+                        },
+                      ),
+                    ),
+                  ],
+                  if (statusMessage != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      statusMessage!,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Theme.of(ctx).colorScheme.primary,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 8),
                   FutureBuilder<List<BoatTrack>>(
                     future: trackService.loadTracks(),
@@ -714,7 +762,7 @@ Future<void> showSavedTracksSheet({
                           padding: EdgeInsets.symmetric(vertical: 28),
                           child: Text(
                             'Пока нет сохранённых треков.\n'
-                            'Нажмите кнопку маршрута справа, чтобы записать проход.',
+                            'Нажмите кнопку маршрута справа, чтобы записать проход, или импортируйте .gpx.',
                             textAlign: TextAlign.center,
                           ),
                         );
@@ -744,13 +792,52 @@ Future<void> showSavedTracksSheet({
                                 '${formatDuration(track.duration)} • '
                                 'ср. ${track.avgSpeedKmh.toStringAsFixed(1)} км/ч',
                               ),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.delete_outline),
-                                onPressed: () async {
-                                  await trackService.deleteTrack(track.id);
-                                  if (isSelected) onSelectTrack(null);
-                                  setSheetState(() {});
-                                },
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    tooltip: 'Экспорт трека в GPX',
+                                    icon: const Icon(
+                                      Icons.file_download_outlined,
+                                    ),
+                                    onPressed: () async {
+                                      try {
+                                        final xml = gpxService.buildGpx(
+                                          tracks: [track],
+                                          documentName: track.name,
+                                        );
+                                        final saved =
+                                            await gpxService.saveGpxFile(
+                                          fileName: track.name,
+                                          gpxContent: xml,
+                                          dialogTitle: 'Экспорт трека в GPX',
+                                        );
+                                        if (!ctx.mounted) return;
+                                        setSheetState(() {
+                                          statusMessage = saved
+                                              ? 'Трек «${track.name}» сохранён в .gpx'
+                                              : 'Сохранение отменено.';
+                                        });
+                                      } catch (e) {
+                                        if (!ctx.mounted) return;
+                                        setSheetState(() {
+                                          statusMessage =
+                                              'Ошибка экспорта: $e';
+                                        });
+                                      }
+                                    },
+                                  ),
+                                  IconButton(
+                                    tooltip: 'Удалить трек',
+                                    icon: const Icon(Icons.delete_outline),
+                                    onPressed: () async {
+                                      await trackService.deleteTrack(track.id);
+                                      if (isSelected) onSelectTrack(null);
+                                      if (!ctx.mounted) return;
+                                      setSheetState(() {});
+                                    },
+                                  ),
+                                ],
                               ),
                               onTap: () {
                                 onSelectTrack(track);
@@ -762,6 +849,342 @@ Future<void> showSavedTracksSheet({
                       );
                     },
                   ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    },
+  );
+}
+
+Future<void> showGpxExchangeSheet({
+  required BuildContext context,
+  required GpxService gpxService,
+  required TrackService trackService,
+  required ApiService apiService,
+  required List<FishingSpot> currentSpots,
+  required ValueChanged<BoatTrack?> onSelectTrack,
+  required Future<void> Function() onSpotsChanged,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (ctx) {
+      var onlyMySpots = false;
+      var busy = false;
+      String? statusMessage;
+
+      return StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          final myId = apiService.currentUserId;
+          final realSpots =
+              currentSpots.where((s) => !s.id.startsWith('demo-')).toList();
+          final exportSpots = onlyMySpots
+              ? realSpots.where((s) => s.isOwnedBy(myId)).toList()
+              : realSpots;
+
+          Future<void> handleExport({
+            required bool includeSpots,
+            required bool includeTracks,
+            required String baseFileName,
+            required String docName,
+          }) async {
+            setSheetState(() {
+              busy = true;
+              statusMessage = null;
+            });
+            try {
+              final tracks = includeTracks
+                  ? await trackService.loadTracks()
+                  : const <BoatTrack>[];
+              final spotsToExport =
+                  includeSpots ? exportSpots : const <FishingSpot>[];
+
+              if (tracks.isEmpty && spotsToExport.isEmpty) {
+                if (!ctx.mounted) return;
+                setSheetState(() {
+                  statusMessage = 'Нет данных для экспорта.';
+                });
+                return;
+              }
+
+              final xml = gpxService.buildGpx(
+                tracks: tracks,
+                spots: spotsToExport,
+                currentUserId: myId,
+                documentName: docName,
+              );
+              final dateTag = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
+              final saved = await gpxService.saveGpxFile(
+                fileName: '${baseFileName}_$dateTag.gpx',
+                gpxContent: xml,
+              );
+              if (!ctx.mounted) return;
+              setSheetState(() {
+                statusMessage = saved
+                    ? 'Файл GPX сохранён (точек: ${spotsToExport.length}, треков: ${tracks.length}).'
+                    : 'Сохранение отменено.';
+              });
+            } catch (e) {
+              if (!ctx.mounted) return;
+              setSheetState(() => statusMessage = 'Ошибка экспорта: $e');
+            } finally {
+              if (ctx.mounted) {
+                setSheetState(() => busy = false);
+              }
+            }
+          }
+
+          Future<void> handleImport() async {
+            setSheetState(() {
+              busy = true;
+              statusMessage = null;
+            });
+            try {
+              final picked = await gpxService.pickAndParseGpxFile();
+              if (!ctx.mounted) return;
+              if (picked == null) {
+                setSheetState(() => busy = false);
+                return;
+              }
+
+              final (fileName, parsed) = picked;
+              if (parsed.isEmpty) {
+                setSheetState(() {
+                  busy = false;
+                  statusMessage =
+                      'В файле «$fileName» не найдено треков и точек.';
+                });
+                return;
+              }
+
+              var importTracks = parsed.tracks.isNotEmpty;
+              var importSpots = parsed.spots.isNotEmpty;
+              var protectSpots = true;
+
+              final confirmed = await showDialog<bool>(
+                context: ctx,
+                builder: (dCtx) => StatefulBuilder(
+                  builder: (dCtx, setDialogState) {
+                    return AlertDialog(
+                      title: Text('Импорт $fileName'),
+                      content: SingleChildScrollView(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Найдено треков: ${parsed.tracks.length}\n'
+                              'Найдено точек: ${parsed.spots.length}',
+                            ),
+                            const SizedBox(height: 10),
+                            if (parsed.tracks.isNotEmpty)
+                              CheckboxListTile(
+                                contentPadding: EdgeInsets.zero,
+                                title: Text(
+                                  'Импортировать треки (${parsed.tracks.length})',
+                                ),
+                                value: importTracks,
+                                onChanged: (v) => setDialogState(
+                                  () => importTracks = v ?? false,
+                                ),
+                              ),
+                            if (parsed.spots.isNotEmpty) ...[
+                              CheckboxListTile(
+                                contentPadding: EdgeInsets.zero,
+                                title: Text(
+                                  'Импортировать точки (${parsed.spots.length})',
+                                ),
+                                value: importSpots,
+                                onChanged: (v) => setDialogState(
+                                  () => importSpots = v ?? false,
+                                ),
+                              ),
+                              if (importSpots)
+                                SwitchListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  title: const Text('Круг доверия (250 м)'),
+                                  subtitle: const Text(
+                                    'Скрыть точные координаты от посторонних',
+                                  ),
+                                  value: protectSpots,
+                                  onChanged: (v) => setDialogState(
+                                    () => protectSpots = v,
+                                  ),
+                                ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(dCtx).pop(false),
+                          child: const Text('Отмена'),
+                        ),
+                        FilledButton(
+                          onPressed: (!importTracks && !importSpots)
+                              ? null
+                              : () => Navigator.of(dCtx).pop(true),
+                          child: const Text('Импортировать'),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              );
+
+              if (confirmed != true) {
+                if (ctx.mounted) setSheetState(() => busy = false);
+                return;
+              }
+
+              var addedTracks = 0;
+              var addedSpots = 0;
+
+              if (importTracks && parsed.tracks.isNotEmpty) {
+                addedTracks = await trackService.saveTracksBatch(parsed.tracks);
+                onSelectTrack(parsed.tracks.first);
+              }
+
+              if (importSpots && parsed.spots.isNotEmpty) {
+                final preparedSpots = parsed.spots
+                    .map((s) => s.copyWith(isPrivateCircle: protectSpots))
+                    .toList();
+                addedSpots = await apiService.importSpotsBatch(preparedSpots);
+                await onSpotsChanged();
+              }
+
+              if (!ctx.mounted) return;
+              setSheetState(() {
+                statusMessage =
+                    'Импортировано из «$fileName»: треков — $addedTracks, '
+                    'точек — $addedSpots'
+                    '${(addedTracks == 0 && addedSpots == 0) ? ' (дубликаты пропущены)' : ''}.';
+              });
+            } catch (e) {
+              if (!ctx.mounted) return;
+              setSheetState(() => statusMessage = 'Ошибка импорта: $e');
+            } finally {
+              if (ctx.mounted) {
+                setSheetState(() => busy = false);
+              }
+            }
+          }
+
+          return SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Экспорт и импорт GPX',
+                    style: Theme.of(ctx).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Универсальный формат .gpx для эхолотов, навигаторов и резервного копирования треков и точек.',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    'Импорт файла .gpx',
+                    style: Theme.of(ctx).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      icon: const Icon(Icons.file_open_outlined),
+                      label: const Text('Выбрать .gpx файл с телефона'),
+                      onPressed: busy ? null : handleImport,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Divider(),
+                  Text(
+                    'Экспорт в .gpx',
+                    style: Theme.of(ctx).textTheme.titleMedium,
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Экспортировать только мои точки'),
+                    subtitle: const Text(
+                      'Чужие точки Круга доверия всегда выгружаются со смещением 250 м',
+                    ),
+                    value: onlyMySpots,
+                    onChanged: busy
+                        ? null
+                        : (v) => setSheetState(() => onlyMySpots = v),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.place_outlined, size: 18),
+                          label: Text('Точки (${exportSpots.length})'),
+                          onPressed: busy
+                              ? null
+                              : () => handleExport(
+                                    includeSpots: true,
+                                    includeTracks: false,
+                                    baseFileName: 'fishradar_spots',
+                                    docName: 'FishRadar Spots',
+                                  ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.route, size: 18),
+                          label: const Text('Все треки'),
+                          onPressed: busy
+                              ? null
+                              : () => handleExport(
+                                    includeSpots: false,
+                                    includeTracks: true,
+                                    baseFileName: 'fishradar_tracks',
+                                    docName: 'FishRadar Tracks',
+                                  ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.tonalIcon(
+                      icon: const Icon(Icons.save_alt),
+                      label: const Text('Экспортировать всё (точки + треки)'),
+                      onPressed: busy
+                          ? null
+                          : () => handleExport(
+                                includeSpots: true,
+                                includeTracks: true,
+                                baseFileName: 'fishradar_backup',
+                                docName: 'FishRadar Backup',
+                              ),
+                    ),
+                  ),
+                  if (busy) ...[
+                    const SizedBox(height: 12),
+                    const LinearProgressIndicator(),
+                  ],
+                  if (statusMessage != null) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      statusMessage!,
+                      style: TextStyle(
+                        color: Theme.of(ctx).colorScheme.primary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
