@@ -480,6 +480,62 @@ class ApiService {
     return offlineSpot;
   }
 
+  /// Пакетный импорт точек из GPX (с защитой от дубликатов и постановкой в очередь синка).
+  /// Возвращает количество добавленных точек.
+  Future<int> importSpotsBatch(List<FishingSpot> incoming) async {
+    if (incoming.isEmpty) return 0;
+
+    final current = await _loadFromCache();
+    final existingReal =
+        current.where((s) => !s.id.startsWith('demo-')).toList();
+    final added = <FishingSpot>[];
+    final baseTs = DateTime.now().millisecondsSinceEpoch;
+
+    for (var i = 0; i < incoming.length; i++) {
+      final raw = incoming[i];
+      final duplicate = [...existingReal, ...added].any((e) {
+        final sameLat = (e.latitude - raw.latitude).abs() < 0.00005;
+        final sameLon = (e.longitude - raw.longitude).abs() < 0.00005;
+        final sameFish =
+            e.fishSpecies.trim().toLowerCase() ==
+            raw.fishSpecies.trim().toLowerCase();
+        return sameLat && sameLon && sameFish;
+      });
+      if (duplicate) continue;
+
+      var prepared = raw.copyWith(
+        id: 'local-gpx-$baseTs-$i',
+        userId: raw.userId ?? currentUserId,
+        authorName: raw.authorName ?? currentAuthorName,
+        isSynced: false,
+      );
+
+      if (prepared.isPrivateCircle &&
+          (prepared.publicLatitude == null ||
+              prepared.publicLongitude == null)) {
+        final shifted = _offsetCoordinate(
+          prepared.latitude,
+          prepared.longitude,
+          minMeters: 120,
+          maxMeters: 210,
+        );
+        prepared = prepared.copyWith(
+          publicLatitude: shifted.$1,
+          publicLongitude: shifted.$2,
+        );
+      }
+
+      added.add(prepared);
+    }
+
+    if (added.isEmpty) return 0;
+
+    final merged = [...added, ...existingReal];
+    await _saveToCache(merged);
+    _updatePendingCounter(merged);
+    return added.length;
+  }
+
   Future<FishingSpot> updateSpot(
     FishingSpot spot, {
     Uint8List? newPhotoBytes,
