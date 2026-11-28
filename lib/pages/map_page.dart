@@ -820,3 +820,1081 @@ class _MapPageState extends State<MapPage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.phishing, size: 28),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '${spot.fishSpecies} • глубина ${spot.depthMeters} м',
+                      style: Theme.of(ctx).textTheme.titleLarge,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              if (hasLocalPhoto || hasRemotePhoto) ...[
+                GestureDetector(
+                  onTap: () => _openFullPhoto(
+                    url: hasRemotePhoto ? spot.photoUrl : null,
+                    localPath: hasLocalPhoto ? spot.localPhotoPath : null,
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: SizedBox(
+                      height: 170,
+                      width: double.infinity,
+                      child: hasLocalPhoto
+                          ? Image.file(
+                              File(spot.localPhotoPath!),
+                              fit: BoxFit.cover,
+                            )
+                          : Image.network(
+                              spot.photoUrl!,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) => Container(
+                                color: Colors.black12,
+                                alignment: Alignment.center,
+                                child: const Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.broken_image_outlined),
+                                    SizedBox(height: 4),
+                                    Text('Фото недоступно офлайн'),
+                                  ],
+                                ),
+                              ),
+                            ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+              ],
+              Text('Рельеф дна: ${spot.bottomType}'),
+              if (spot.fishWeightKg != null)
+                Text('Вес улова: ${spot.fishWeightKg} кг'),
+              Text('Расстояние: ${formatDistance(distMeters)}'),
+              if (spot.authorName != null && spot.authorName!.isNotEmpty)
+                Text('Рыбак: ${spot.authorName}'),
+              Text('Дата: $dateStr'),
+              if (!spot.isSynced)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Chip(
+                    avatar: Icon(Icons.cloud_off, size: 18),
+                    label: Text('Ждёт отправки в облако'),
+                  ),
+                ),
+              if (spot.isPrivateCircle)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Chip(
+                    avatar: Icon(
+                      spot.isTrustedFriend ? Icons.verified_user : Icons.shield,
+                      size: 18,
+                    ),
+                    label: Text(
+                      isMine
+                          ? 'Круг доверия: вы видите точную точку'
+                          : spot.isTrustedFriend
+                              ? 'Круг доверия: друг открыл вам точную точку'
+                              : 'Круг доверия: зона 250 м (точная точка скрыта)',
+                    ),
+                  ),
+                ),
+              if (spot.comment.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(spot.comment),
+              ],
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.navigation),
+                  label: const Text('Курс на эту точку'),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    _setNavTarget(
+                      spotPoint,
+                      '${spot.fishSpecies} (${spot.depthMeters} м)',
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  icon: const Icon(Icons.wb_sunny_outlined),
+                  label: const Text('Погода и индекс клёва в точке'),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    _openWeatherSheet(
+                      spotPoint,
+                      title: '${spot.fishSpecies} • ${spot.depthMeters} м',
+                    );
+                  },
+                ),
+              ),
+              if (isMine) ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.edit_outlined),
+                        label: const Text('Изменить'),
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          _openEditSpot(spot);
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Удалить'),
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          _confirmDeleteSpot(spot);
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Color _depthColor(double depth) {
+    if (depth < 3) return Colors.green.shade600;
+    if (depth < 7) return Colors.blue.shade700;
+    if (depth < 12) return Colors.indigo.shade800;
+    return Colors.purple.shade800;
+  }
+
+  String _compassDirection(double bearingDeg) {
+    const dirs = ['С', 'СВ', 'В', 'ЮВ', 'Ю', 'ЮЗ', 'З', 'СЗ'];
+    final idx = (((bearingDeg % 360) + 360) % 360 / 45).round() % 8;
+    return dirs[idx];
+  }
+
+  double get _rulerTotalMeters {
+    if (_rulerPoints.length < 2) return 0.0;
+    var sum = 0.0;
+    for (var i = 1; i < _rulerPoints.length; i++) {
+      sum += _distanceCalc.as(
+        LengthUnit.Meter,
+        _rulerPoints[i - 1],
+        _rulerPoints[i],
+      );
+    }
+    return sum;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final myId = _apiService.currentUserId;
+    final ringCenter = _myPosition ?? _currentCenter;
+
+    final filteredSpots = _spots.where((s) {
+      if (_settings.onlyMySpots && !s.isOwnedBy(myId)) return false;
+      if (_settings.fishFilter.isNotEmpty) {
+        final q = _settings.fishFilter.toLowerCase();
+        if (!s.fishSpecies.toLowerCase().contains(q)) return false;
+      }
+      return true;
+    }).toList();
+
+    final baseUrl = _settings.baseMap == BaseMapType.standard
+        ? OfflineMapService.standardUrlTemplate
+        : OfflineMapService.satelliteUrlTemplate;
+    final baseFallbackUrl = _settings.baseMap == BaseMapType.standard
+        ? _standardFallbackUrl
+        : _satelliteFallbackUrl;
+
+    final navOrigin = _myPosition ?? _currentCenter;
+    double? navDistanceMeters;
+    double? navBearingDeg;
+    if (_navTargetPoint != null) {
+      navDistanceMeters = _distanceCalc.as(
+        LengthUnit.Meter,
+        navOrigin,
+        _navTargetPoint!,
+      );
+      final rawBearing = _distanceCalc.bearing(navOrigin, _navTargetPoint!);
+      navBearingDeg = ((rawBearing % 360) + 360) % 360;
+    }
+
+    final activeMbtilesName = _activeMbtilesPathLoaded?.split('/').last;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('FishRadar'),
+        actions: [
+          IconButton(
+            tooltip: 'Чат водоёмов',
+            icon: const Icon(Icons.forum_outlined),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const ChatPage()),
+              );
+            },
+          ),
+          IconButton(
+            tooltip: 'Сохранённые треки и GPX',
+            icon: Icon(
+              Icons.timeline,
+              color: _loadedTrack != null
+                  ? Theme.of(context).colorScheme.primary
+                  : null,
+            ),
+            onPressed: () => showSavedTracksSheet(
+              context: context,
+              trackService: _trackService,
+              gpxService: _gpxService,
+              activeLoadedTrack: _loadedTrack,
+              onSelectTrack: _selectAndFitTrack,
+              onOpenGpxSheet: _openGpxExchangeSheet,
+            ),
+          ),
+          IconButton(
+            tooltip: 'Офлайн-карты',
+            icon: Icon(
+              _activeMbtilesProvider != null || _overlayMbtilesProvider != null
+                  ? Icons.offline_pin
+                  : Icons.cloud_download_outlined,
+            ),
+            onPressed: () => showOfflineCacheSheet(
+              context: context,
+              offlineService: _offlineService,
+              currentSettings: _settings,
+              onSettingsChanged: _updateSettings,
+              onCacheCleared: () => setState(() => _cacheEpoch++),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Слои, фильтры и GPX',
+            icon: Badge(
+              isLabelVisible: _settings.showSeamarks ||
+                  _settings.onlyMySpots ||
+                  _settings.fishFilter.isNotEmpty,
+              child: const Icon(Icons.layers),
+            ),
+            onPressed: () => showLayersSheet(
+              context: context,
+              current: _settings,
+              onChanged: _updateSettings,
+              onOpenGpx: _openGpxExchangeSheet,
+            ),
+          ),
+          IconButton(
+            tooltip: 'Профиль и синхронизация',
+            icon: Badge(
+              isLabelVisible: _pendingSyncCount > 0,
+              label: Text('$_pendingSyncCount'),
+              child: Icon(
+                _apiService.currentUser != null
+                    ? Icons.account_circle
+                    : Icons.account_circle_outlined,
+              ),
+            ),
+            onPressed: () async {
+              final changed = await Navigator.of(context).push<bool>(
+                MaterialPageRoute(builder: (_) => const AuthPage()),
+              );
+              if (changed == true && mounted) {
+                await _loadSpots();
+              }
+            },
+          ),
+        ],
+      ),
+      body: Stack(
+        children: [
+          FlutterMap(
+            mapController: _mapController,
+            options: MapOptions(
+              initialCenter: _currentCenter,
+              initialZoom: _currentZoom,
+              onMapReady: () {
+                _isMapReady = true;
+                if (_myPosition != null) {
+                  _safeMove(_myPosition!, 14);
+                }
+                if (_settings.showSeamarks) {
+                  _refreshWaterways();
+                }
+              },
+              onTap: (_, point) {
+                if (_isRulerMode) {
+                  setState(() => _rulerPoints.add(point));
+                }
+              },
+              onLongPress: (_, point) {
+                if (!_isRulerMode) {
+                  _showMapLongPressMenu(point);
+                }
+              },
+              onPositionChanged: (camera, _) {
+                _currentCenter = camera.center;
+                _currentZoom = camera.zoom;
+                final rotDiff = (camera.rotation - _mapRotationDeg).abs();
+                if (rotDiff > 1.0) {
+                  setState(() => _mapRotationDeg = camera.rotation);
+                }
+                if (_settings.showSeamarks) {
+                  _waterwayDebounce?.cancel();
+                  _waterwayDebounce = Timer(
+                    const Duration(milliseconds: 900),
+                    _refreshWaterways,
+                  );
+                }
+              },
+            ),
+            children: [
+              if (_activeMbtilesProvider != null)
+                TileLayer(
+                  key: ValueKey('mbtiles-base-$_activeMbtilesPathLoaded'),
+                  tileProvider: _activeMbtilesProvider!,
+                  maxNativeZoom: 18,
+                )
+              else ...[
+                _ManagedOnlineTileLayer(
+                  key: ValueKey(
+                    'online-base-${_settings.baseMap.name}-$_cacheEpoch',
+                  ),
+                  offlineService: _offlineService,
+                  urlTemplate: baseUrl,
+                  fallbackUrl: baseFallbackUrl,
+                  maxNativeZoom:
+                      _settings.baseMap == BaseMapType.standard ? 19 : 18,
+                ),
+                if (_settings.baseMap == BaseMapType.hybrid) ...[
+                  _ManagedOnlineTileLayer(
+                    key: ValueKey('online-hybrid-transport-$_cacheEpoch'),
+                    offlineService: _offlineService,
+                    urlTemplate: OfflineMapService.hybridTransportUrlTemplate,
+                    fallbackUrl: _hybridTransportFallbackUrl,
+                    maxNativeZoom: 18,
+                  ),
+                  _ManagedOnlineTileLayer(
+                    key: ValueKey('online-hybrid-labels-$_cacheEpoch'),
+                    offlineService: _offlineService,
+                    urlTemplate: OfflineMapService.hybridLabelsUrlTemplate,
+                    fallbackUrl: _hybridLabelsFallbackUrl,
+                    maxNativeZoom: 18,
+                  ),
+                ],
+              ],
+              if (_overlayMbtilesProvider != null)
+                TileLayer(
+                  key: ValueKey('mbtiles-overlay-$_overlayMbtilesPathLoaded'),
+                  tileProvider: _overlayMbtilesProvider!,
+                  maxNativeZoom: 18,
+                ),
+              if (_settings.showSeamarks)
+                _ManagedOnlineTileLayer(
+                  key: ValueKey('seamarks-overlay-$_cacheEpoch'),
+                  offlineService: _offlineService,
+                  urlTemplate: OfflineMapService.seamarkUrlTemplate,
+                  minNativeZoom: 9,
+                  maxNativeZoom: 17,
+                ),
+              if (_settings.showSeamarks &&
+                  _waterwayData.fairwayLines.isNotEmpty)
+                PolylineLayer<Object>(
+                  polylines: _waterwayData.fairwayLines
+                      .map(
+                        (pts) => Polyline<Object>(
+                          points: pts,
+                          color: Colors.lightBlueAccent.shade700,
+                          strokeWidth: 3.0,
+                          pattern: StrokePattern.dashed(
+                            segments: const [10, 6],
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              if (_settings.ringPreset.radii.isNotEmpty)
+                CircleLayer<Object>(
+                  circles: _settings.ringPreset.radii
+                      .map(
+                        (r) => CircleMarker<Object>(
+                          point: ringCenter,
+                          radius: r,
+                          useRadiusInMeter: true,
+                          color: Colors.transparent,
+                          borderColor: Colors.blue.withValues(alpha: 0.55),
+                          borderStrokeWidth: 1.5,
+                        ),
+                      )
+                      .toList(),
+                ),
+              if (_settings.ringPreset.radii.isNotEmpty)
+                MarkerLayer(
+                  markers: _settings.ringPreset.radii.map((r) {
+                    final labelPos = _distanceCalc.offset(ringCenter, r, 0);
+                    return Marker(
+                      point: labelPos,
+                      width: 54,
+                      height: 20,
+                      child: Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 1,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.60),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            '${r.toInt()} м',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+              CircleLayer<Object>(
+                circles: filteredSpots.where((s) => s.isPrivateCircle).map((s) {
+                  final center = (s.publicLatitude != null &&
+                          s.publicLongitude != null)
+                      ? LatLng(s.publicLatitude!, s.publicLongitude!)
+                      : s.displayPointFor(myId);
+                  return CircleMarker<Object>(
+                    point: center,
+                    radius: 250,
+                    useRadiusInMeter: true,
+                    color: Colors.orange.withValues(alpha: 0.16),
+                    borderColor: Colors.orange.withValues(alpha: 0.75),
+                    borderStrokeWidth: 1.5,
+                  );
+                }).toList(),
+              ),
+              if (_loadedTrack != null && _loadedTrack!.points.length >= 2)
+                PolylineLayer<Object>(
+                  polylines: <Polyline<Object>>[
+                    Polyline<Object>(
+                      points: _loadedTrack!.points,
+                      color: Colors.deepPurpleAccent,
+                      strokeWidth: 4,
+                    ),
+                  ],
+                ),
+              if (_trackPoints.length >= 2)
+                PolylineLayer<Object>(
+                  polylines: <Polyline<Object>>[
+                    Polyline<Object>(
+                      points: _trackPoints,
+                      color: Colors.redAccent,
+                      strokeWidth: 4,
+                    ),
+                  ],
+                ),
+              if (_navTargetPoint != null)
+                PolylineLayer<Object>(
+                  polylines: <Polyline<Object>>[
+                    Polyline<Object>(
+                      points: [navOrigin, _navTargetPoint!],
+                      color: Colors.amber.shade800,
+                      strokeWidth: 3.5,
+                      pattern: StrokePattern.dashed(segments: const [10, 8]),
+                    ),
+                  ],
+                ),
+              if (_rulerPoints.length >= 2)
+                PolylineLayer<Object>(
+                  polylines: <Polyline<Object>>[
+                    Polyline<Object>(
+                      points: _rulerPoints,
+                      color: Colors.cyan.shade700,
+                      strokeWidth: 3.5,
+                    ),
+                  ],
+                ),
+              MarkerLayer(
+                markers: [
+                  if (_myPosition != null)
+                    Marker(
+                      point: _myPosition!,
+                      width: 36,
+                      height: 36,
+                      child: _myHeadingDeg != null
+                          ? Transform.rotate(
+                              angle: _myHeadingDeg! * math.pi / 180,
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.blue,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 2.5,
+                                  ),
+                                ),
+                                child: const Icon(
+                                  Icons.navigation,
+                                  color: Colors.white,
+                                  size: 20,
+                                ),
+                              ),
+                            )
+                          : Container(
+                              decoration: BoxDecoration(
+                                color: Colors.blue,
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: Colors.white,
+                                  width: 3,
+                                ),
+                              ),
+                            ),
+                    ),
+                  if (_navTargetPoint != null)
+                    Marker(
+                      point: _navTargetPoint!,
+                      width: 34,
+                      height: 34,
+                      child: const Icon(
+                        Icons.flag_circle,
+                        color: Colors.amber,
+                        size: 32,
+                      ),
+                    ),
+                  ..._rulerPoints.map(
+                    (p) => Marker(
+                      point: p,
+                      width: 14,
+                      height: 14,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.cyan.shade700,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (_settings.showSeamarks)
+                    ..._waterwayData.marks.map(
+                      (mark) => Marker(
+                        point: mark.point,
+                        width: 28,
+                        height: 28,
+                        child: GestureDetector(
+                          onTap: () => _showWaterwayMarkDetails(mark),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.9),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: _waterwayMarkColor(mark),
+                                width: 1.5,
+                              ),
+                            ),
+                            child: Icon(
+                              _waterwayMarkIcon(mark.kind),
+                              color: _waterwayMarkColor(mark),
+                              size: 16,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ...filteredSpots.map((spot) {
+                    final pt = spot.displayPointFor(myId);
+                    final color = _depthColor(spot.depthMeters);
+                    return Marker(
+                      point: pt,
+                      width: 58,
+                      height: 44,
+                      child: GestureDetector(
+                        onTap: () => _showSpotDetails(spot),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: color,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                '${spot.depthMeters.toStringAsFixed(1)}м',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            Icon(
+                              spot.isPrivateCircle
+                                  ? (spot.isTrustedFriend
+                                      ? Icons.verified_user
+                                      : Icons.shield)
+                                  : Icons.location_on,
+                              color: spot.isPrivateCircle
+                                  ? (spot.isTrustedFriend
+                                      ? Colors.teal
+                                      : Colors.orange)
+                                  : color,
+                              size: 22,
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }),
+                ],
+              ),
+              const Scalebar(
+                alignment: Alignment.topRight,
+                padding: EdgeInsets.fromLTRB(0, 12, 12, 0),
+              ),
+            ],
+          ),
+          if (_isLoading)
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: LinearProgressIndicator(),
+            ),
+          if (_navTargetPoint != null &&
+              navDistanceMeters != null &&
+              navBearingDeg != null)
+            Positioned(
+              top: 12,
+              left: 12,
+              right: 96,
+              child: Card(
+                color: Colors.black.withValues(alpha: 0.82),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  child: Row(
+                    children: [
+                      Transform.rotate(
+                        angle: navBearingDeg * math.pi / 180,
+                        child: const Icon(
+                          Icons.navigation,
+                          color: Colors.amber,
+                          size: 24,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _navTargetLabel ?? 'Цель',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              '${formatDistance(navDistanceMeters)} • '
+                              '${navBearingDeg.round()}° (${_compassDirection(navBearingDeg)})',
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.close, color: Colors.white70),
+                        onPressed: _clearNavTarget,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          if (_isRulerMode)
+            Positioned(
+              top: _navTargetPoint != null ? 82 : 12,
+              left: 12,
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.straighten, size: 18),
+                      const SizedBox(width: 8),
+                      Text(
+                        _rulerPoints.length < 2
+                            ? 'Тапайте по карте для замера'
+                            : 'Замер: ${formatDistance(_rulerTotalMeters)} (${_rulerPoints.length} т.)',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      if (_rulerPoints.isNotEmpty) ...[
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          tooltip: 'Отменить точку',
+                          icon: const Icon(Icons.undo, size: 18),
+                          onPressed: () =>
+                              setState(() => _rulerPoints.removeLast()),
+                        ),
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          tooltip: 'Сбросить',
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          onPressed: () => setState(() => _rulerPoints.clear()),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          Positioned(
+            left: 12,
+            bottom: 20,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    ActionChip(
+                      visualDensity: VisualDensity.compact,
+                      avatar: Icon(
+                        _activeMbtilesProvider != null
+                            ? Icons.offline_pin
+                            : _settings.baseMap == BaseMapType.hybrid
+                                ? Icons.layers
+                                : _settings.baseMap == BaseMapType.satellite
+                                    ? Icons.satellite_alt
+                                    : Icons.map,
+                        size: 16,
+                      ),
+                      label: Text(_baseMapLabel()),
+                      onPressed: _cycleBaseMap,
+                    ),
+                    FilterChip(
+                      visualDensity: VisualDensity.compact,
+                      avatar: const Icon(Icons.anchor, size: 16),
+                      label: const Text('Фарватер'),
+                      selected: _settings.showSeamarks,
+                      onSelected: (_) => _toggleSeamarks(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _legendDot(Colors.green.shade600, '<3м'),
+                        const SizedBox(width: 8),
+                        _legendDot(Colors.blue.shade700, '3–7м'),
+                        const SizedBox(width: 8),
+                        _legendDot(Colors.indigo.shade800, '7–12м'),
+                        const SizedBox(width: 8),
+                        _legendDot(Colors.purple.shade800, '>12м'),
+                      ],
+                    ),
+                  ),
+                ),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (activeMbtilesName != null)
+                          Text(
+                            'Офлайн-карта: $activeMbtilesName',
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(
+                                  color: Theme.of(context).colorScheme.primary,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                        if (_waterwayStatus != null)
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (_isLoadingWaterways) ...[
+                                const SizedBox(
+                                  width: 11,
+                                  height: 11,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 1.8,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                              ],
+                              ConstrainedBox(
+                                constraints:
+                                    const BoxConstraints(maxWidth: 235),
+                                child: Text(
+                                  _waterwayStatus!,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .labelSmall
+                                      ?.copyWith(
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .primary,
+                                      ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        if (_isTracking) ...[
+                          Text(
+                            'Трек: ${formatDistance(_trackDistanceMeters)} • '
+                            '${_speedKmh.toStringAsFixed(1)} км/ч',
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                          if (_trackPoints.isNotEmpty)
+                            TextButton.icon(
+                              style: TextButton.styleFrom(
+                                padding: EdgeInsets.zero,
+                                minimumSize: const Size(0, 28),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              icon: const Icon(Icons.home, size: 16),
+                              label: const Text('К старту (на берег)'),
+                              onPressed: () => _setNavTarget(
+                                _trackPoints.first,
+                                'Старт трека (берег)',
+                              ),
+                            ),
+                        ] else
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'Долгое нажатие — точка или курс',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                              const SizedBox(width: 6),
+                              InkWell(
+                                onTap: _loadSpots,
+                                child: const Icon(Icons.refresh, size: 17),
+                              ),
+                            ],
+                          ),
+                        if (_pendingSyncCount > 0)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: InkWell(
+                              onTap: _loadSpots,
+                              child: Text(
+                                'Ожидают отправки: $_pendingSyncCount т. (нажмите для повтора)',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .labelSmall
+                                    ?.copyWith(color: Colors.orange[800]),
+                              ),
+                            ),
+                          ),
+                        if (_syncStatusNote != null)
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 250),
+                            child: Text(
+                              _syncStatusNote!,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelSmall
+                                  ?.copyWith(color: Colors.red[700]),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_mapRotationDeg.abs() > 2.0) ...[
+            FloatingActionButton.small(
+              heroTag: 'compass',
+              tooltip: 'Север вверх',
+              onPressed: () {
+                _mapController.rotate(0);
+                setState(() => _mapRotationDeg = 0.0);
+              },
+              child: const Icon(Icons.explore),
+            ),
+            const SizedBox(height: 10),
+          ],
+          FloatingActionButton.small(
+            heroTag: 'diary',
+            tooltip: 'Личный дневник и снасти',
+            onPressed: _openDiary,
+            child: const Icon(Icons.menu_book_outlined),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton.small(
+            heroTag: 'weather',
+            tooltip: 'Погода, индекс клёва и запреты',
+            onPressed: () => _openWeatherSheet(
+              _myPosition ?? _currentCenter,
+              title: _myPosition != null
+                  ? 'Погода рядом со мной'
+                  : 'Погода в районе карты',
+            ),
+            child: const Icon(Icons.wb_sunny_outlined),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton.small(
+            heroTag: 'ruler',
+            tooltip: _isRulerMode ? 'Выключить линейку' : 'Линейка расстояний',
+            backgroundColor: _isRulerMode ? Colors.cyan : null,
+            foregroundColor: _isRulerMode ? Colors.white : null,
+            onPressed: () => setState(() => _isRulerMode = !_isRulerMode),
+            child: const Icon(Icons.straighten),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton.small(
+            heroTag: 'gps',
+            tooltip: 'Моё местоположение',
+            onPressed: _goToMyLocation,
+            child: const Icon(Icons.my_location),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton.small(
+            heroTag: 'track',
+            tooltip: _isTracking ? 'Остановить трек' : 'Записать трек лодки',
+            backgroundColor: _isTracking ? Colors.red : null,
+            foregroundColor: _isTracking ? Colors.white : null,
+            onPressed: _toggleTrackRecording,
+            child: Icon(_isTracking ? Icons.stop : Icons.route),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton(
+            heroTag: 'add',
+            tooltip: 'Добавить точку',
+            onPressed: () => _openCreateSpot(_myPosition ?? _currentCenter),
+            child: const Icon(Icons.add_location_alt),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _legendDot(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 9,
+          height: 9,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: const TextStyle(fontSize: 11)),
+      ],
+    );
+  }
+}
+
+class _ManagedOnlineTileLayer extends StatefulWidget {
+  final OfflineMapService offlineService;
+  final String urlTemplate;
+  final String? fallbackUrl;
+  final int minNativeZoom;
+  final int maxNativeZoom;
+
+  const _ManagedOnlineTileLayer({
+    super.key,
+    required this.offlineService,
+    required this.urlTemplate,
+    this.fallbackUrl,
+    this.minNativeZoom = 0,
+    this.maxNativeZoom = 19,
+  });
+
+  @override
+  State<_ManagedOnlineTileLayer> createState() =>
+      _ManagedOnlineTileLayerState();
+}
+
+class _ManagedOnlineTileLayerState extends State<_ManagedOnlineTileLayer> {
+  late final TileProvider _tileProvider;
+
+  @override
+  void initState() {
+    super.initState();
+    _tileProvider = _createProvider();
+  }
+
+  TileProvider _createProvider() {
+    try {
+      return widget.offlineService.createTileProvider();
+    } catch (_) {
+      return NetworkTileProvider();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TileLayer(
+      urlTemplate: widget.urlTemplate,
+      fallbackUrl: widget.fallbackUrl,
+      userAgentPackageName: 'ru.fishingradar.app',
+      tileProvider: _tileProvider,
+      minNativeZoom: widget.minNativeZoom,
+      maxNativeZoom: widget.maxNativeZoom,
+      evictErrorTileStrategy: EvictErrorTileStrategy.dispose,
+    );
+  }
+}
