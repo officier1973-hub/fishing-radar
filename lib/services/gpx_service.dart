@@ -348,4 +348,168 @@ class GpxService {
         content.toLowerCase().contains('<gpx');
 
     if (!looksLikeGpx) {
-      throw con
+      throw const FormatException(
+        'Выбранный файл не является GPX-треком или набором точек (.gpx)',
+      );
+    }
+
+    final result = parseGpx(content);
+    return (picked.name, result);
+  }
+
+  BoatTrack? _buildTrackFromPointTag({
+    required String body,
+    required String pointTag,
+    required String fallbackName,
+    required DateTime fallbackTime,
+    required String idSeed,
+  }) {
+    final ptRegex = RegExp(
+      '<$pointTag\\b([^>]*?)(?:/>|>([\\s\\S]*?)</$pointTag>)',
+      caseSensitive: false,
+    );
+
+    final points = <LatLng>[];
+    final times = <DateTime?>[];
+
+    for (final m in ptRegex.allMatches(body)) {
+      final attrs = m.group(1) ?? '';
+      final ptBody = m.group(2) ?? '';
+      final lat = _parseAttrDouble(attrs, 'lat');
+      final lon = _parseAttrDouble(attrs, 'lon');
+      if (lat == null ||
+          lon == null ||
+          lat < -90 ||
+          lat > 90 ||
+          lon < -180 ||
+          lon > 180) {
+        continue;
+      }
+      points.add(LatLng(lat, lon));
+      times.add(_parseDateTime(_extractFirstTag(ptBody, 'time')));
+    }
+
+    if (points.length < 2) return null;
+
+    var totalMeters = 0.0;
+    var maxSpeedKmh = 0.0;
+    for (var i = 1; i < points.length; i++) {
+      final segMeters = _distanceCalc.as(
+        LengthUnit.Meter,
+        points[i - 1],
+        points[i],
+      );
+      totalMeters += segMeters;
+
+      final tPrev = times[i - 1];
+      final tCurr = times[i];
+      if (tPrev != null && tCurr != null) {
+        final dtSec = tCurr.difference(tPrev).inMilliseconds / 1000.0;
+        if (dtSec >= 1.0) {
+          final speedKmh = (segMeters / dtSec) * 3.6;
+          if (speedKmh <= 120.0 && speedKmh > maxSpeedKmh) {
+            maxSpeedKmh = speedKmh;
+          }
+        }
+      }
+    }
+
+    final validTimes = times.whereType<DateTime>().toList();
+    final startedAt = validTimes.isNotEmpty ? validTimes.first : fallbackTime;
+    final endedAt = validTimes.isNotEmpty ? validTimes.last : startedAt;
+
+    return BoatTrack(
+      id: 'gpx-$idSeed',
+      name: fallbackName,
+      startedAt: startedAt,
+      endedAt: endedAt.isBefore(startedAt) ? startedAt : endedAt,
+      distanceMeters: totalMeters,
+      maxSpeedKmh: maxSpeedKmh,
+      points: points,
+    );
+  }
+
+  double? _parseAttrDouble(String attrs, String attrName) {
+    final match = RegExp(
+      '(?:^|\\s)$attrName\\s*=\\s*["\']([^"\']+)["\']',
+      caseSensitive: false,
+    ).firstMatch(attrs);
+    if (match == null) return null;
+    return _parseDoubleText(match.group(1));
+  }
+
+  double? _parseDoubleText(String? raw) {
+    if (raw == null) return null;
+    return double.tryParse(raw.trim().replaceAll(',', '.'));
+  }
+
+  DateTime? _parseDateTime(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return null;
+    return DateTime.tryParse(raw.trim())?.toLocal();
+  }
+
+  double? _extractDepthFromText(String text) {
+    final explicit = RegExp(
+      r'(?:глубина|depth|гл\.?)\s*[:=]?\s*(\d+(?:[.,]\d+)?)\s*(?:м|m)?',
+      caseSensitive: false,
+    ).firstMatch(text);
+    if (explicit != null) {
+      return _parseDoubleText(explicit.group(1));
+    }
+    final meters = RegExp(
+      r'(\d+(?:[.,]\d+)?)\s*м\b',
+      caseSensitive: false,
+    ).firstMatch(text);
+    if (meters != null) {
+      return _parseDoubleText(meters.group(1));
+    }
+    return null;
+  }
+
+  double? _extractWeightFromText(String text) {
+    final match = RegExp(
+      r'(?:вес|weight)\s*[:=]?\s*(\d+(?:[.,]\d+)?)\s*(?:кг|kg)?',
+      caseSensitive: false,
+    ).firstMatch(text);
+    return match != null ? _parseDoubleText(match.group(1)) : null;
+  }
+
+  String? _extractFirstTag(String xml, String tagName) {
+    final escapedTag = RegExp.escape(tagName);
+    final match = RegExp(
+      '<$escapedTag\\b[^>]*>([\\s\\S]*?)</$escapedTag>',
+      caseSensitive: false,
+    ).firstMatch(xml);
+    if (match == null) return null;
+    return _unescapeXml(match.group(1) ?? '');
+  }
+
+  String _escapeXml(String input) {
+    final cleaned = input.replaceAll(
+      RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F]'),
+      '',
+    );
+    return cleaned
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&apos;');
+  }
+
+  String _unescapeXml(String input) {
+    var text = input.trim();
+    text = text.replaceAllMapped(
+      RegExp(r'<!\[CDATA\[([\s\S]*?)\]\]>'),
+      (m) => m.group(1) ?? '',
+    );
+    return text
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&apos;', "'")
+        .replaceAll('&#39;', "'")
+        .replaceAll('&amp;', '&')
+        .trim();
+  }
+}
