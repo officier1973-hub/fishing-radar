@@ -260,6 +260,9 @@ class _MapPageState extends State<MapPage> {
   }
 
   String _shortWaterwayError(Object error) {
+    if (error is WaterwayLoadException) {
+      return 'нет ответа серверов (${error.summary})';
+    }
     if (error is HttpException) return 'ошибка (${error.message})';
     if (error is SocketException) return 'нет сети или сервер недоступен';
     if (error is TimeoutException) return 'таймаут ответа сервера';
@@ -1670,10 +1673,10 @@ class _MapPageState extends State<MapPage> {
                               ],
                               ConstrainedBox(
                                 constraints:
-                                    const BoxConstraints(maxWidth: 235),
+                                    const BoxConstraints(maxWidth: 255),
                                 child: Text(
                                   _waterwayStatus!,
-                                  maxLines: 2,
+                                  maxLines: 3,
                                   overflow: TextOverflow.ellipsis,
                                   style: Theme.of(context)
                                       .textTheme
