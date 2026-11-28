@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 enum WaterwayMarkKind {
   buoy,
@@ -24,6 +26,30 @@ class WaterwayMark {
     required this.title,
     this.detail = '',
   });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'lat': point.latitude,
+      'lon': point.longitude,
+      'kind': kind.index,
+      'title': title,
+      'detail': detail,
+    };
+  }
+
+  factory WaterwayMark.fromJson(Map<String, dynamic> json) {
+    final kindIdx = (json['kind'] as num?)?.toInt() ?? 5;
+    return WaterwayMark(
+      point: LatLng(
+        (json['lat'] as num).toDouble(),
+        (json['lon'] as num).toDouble(),
+      ),
+      kind: WaterwayMarkKind
+          .values[kindIdx.clamp(0, WaterwayMarkKind.values.length - 1)],
+      title: (json['title'] ?? 'Водный знак').toString(),
+      detail: (json['detail'] ?? '').toString(),
+    );
+  }
 }
 
 class WaterwayOverlayData {
@@ -41,13 +67,65 @@ class WaterwayOverlayData {
     fairwayLines: [],
     marks: [],
   );
+
+  Map<String, dynamic> toJson() {
+    return {
+      'lines': fairwayLines
+          .map(
+            (line) => line.map((p) => [p.latitude, p.longitude]).toList(),
+          )
+          .toList(),
+      'marks': marks.map((m) => m.toJson()).toList(),
+    };
+  }
+
+  factory WaterwayOverlayData.fromJson(
+    Map<String, dynamic> json, {
+    bool fromCache = true,
+  }) {
+    final rawLines = (json['lines'] as List<dynamic>?) ?? const [];
+    final lines = <List<LatLng>>[];
+    for (final rawLine in rawLines) {
+      if (rawLine is! List) continue;
+      final pts = <LatLng>[];
+      for (final rawPt in rawLine) {
+        if (rawPt is List && rawPt.length >= 2) {
+          final lat = (rawPt[0] as num?)?.toDouble();
+          final lon = (rawPt[1] as num?)?.toDouble();
+          if (lat != null && lon != null) {
+            pts.add(LatLng(lat, lon));
+          }
+        }
+      }
+      if (pts.length >= 2) {
+        lines.add(pts);
+      }
+    }
+
+    final rawMarks = (json['marks'] as List<dynamic>?) ?? const [];
+    final marks = rawMarks
+        .whereType<Map>()
+        .map((m) => WaterwayMark.fromJson(Map<String, dynamic>.from(m)))
+        .toList();
+
+    return WaterwayOverlayData(
+      fairwayLines: lines,
+      marks: marks,
+      fromCache: fromCache,
+    );
+  }
 }
 
 class WaterwayService {
   static const List<String> _endpoints = [
+    'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter',
     'https://overpass-api.de/api/interpreter',
-    'https://overpass.kumi.systems/api/interpreter',
   ];
+
+  static const String _diskCachePrefix = 'waterway_cache_v1_';
+  static const String _diskKeysIndexKey = 'waterway_cache_keys_v1';
+  static const Duration _diskCacheTtl = Duration(days: 7);
 
   final Map<String, WaterwayOverlayData> _memoryCache = {};
 
@@ -59,8 +137,8 @@ class WaterwayService {
 
     final centerLat = (s + n) / 2.0;
     final centerLon = (w + e) / 2.0;
-    final halfLat = ((n - s) / 2.0).clamp(0.01, 0.25);
-    final halfLon = ((e - w) / 2.0).clamp(0.01, 0.35);
+    final halfLat = ((n - s) / 2.0).clamp(0.01, 0.22);
+    final halfLon = ((e - w) / 2.0).clamp(0.01, 0.30);
 
     final qSouth = centerLat - halfLat;
     final qNorth = centerLat + halfLat;
@@ -71,20 +149,26 @@ class WaterwayService {
         '${qSouth.toStringAsFixed(2)}_${qWest.toStringAsFixed(2)}_'
         '${qNorth.toStringAsFixed(2)}_${qEast.toStringAsFixed(2)}';
 
-    final cached = _memoryCache[cacheKey];
-    if (cached != null) {
+    final memCached = _memoryCache[cacheKey];
+    if (memCached != null) {
       return WaterwayOverlayData(
-        fairwayLines: cached.fairwayLines,
-        marks: cached.marks,
+        fairwayLines: memCached.fairwayLines,
+        marks: memCached.marks,
         fromCache: true,
       );
+    }
+
+    final diskEntry = await _loadFromDiskCache(cacheKey);
+    if (diskEntry != null && !diskEntry.isExpired) {
+      _putMemoryCache(cacheKey, diskEntry.data);
+      return diskEntry.data;
     }
 
     final bbox =
         '${qSouth.toStringAsFixed(4)},${qWest.toStringAsFixed(4)},'
         '${qNorth.toStringAsFixed(4)},${qEast.toStringAsFixed(4)}';
 
-    final query = '[out:json][timeout:15];'
+    final query = '[out:json][timeout:12][maxsize:16777216];'
         '('
         'way["waterway"="fairway"]($bbox);'
         'node["seamark:type"]($bbox);'
@@ -95,34 +179,52 @@ class WaterwayService {
 
     Object? lastErr;
     for (final endpoint in _endpoints) {
-      final client = HttpClient();
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 8);
       try {
         final uri = Uri.parse(endpoint);
         final req = await client.postUrl(uri).timeout(
-              const Duration(seconds: 15),
+              const Duration(seconds: 10),
             );
-        req.headers.set('User-Agent', 'FishingRadar/0.3.0 (ru.fishingradar.app)');
+        req.headers.set(
+          'User-Agent',
+          'FishingRadar/0.3.0 (ru.fishingradar.app)',
+        );
         req.headers.set('Accept', 'application/json');
         req.headers.set(
           'Content-Type',
           'application/x-www-form-urlencoded; charset=UTF-8',
         );
-        final bodyBytes = utf8.encode('data=${Uri.encodeQueryComponent(query)}');
+        final bodyBytes = utf8.encode(
+          'data=${Uri.encodeQueryComponent(query)}',
+        );
+        req.contentLength = bodyBytes.length;
         req.add(bodyBytes);
 
-        final res = await req.close().timeout(const Duration(seconds: 15));
+        final res = await req.close().timeout(const Duration(seconds: 14));
+        final raw = await res
+            .transform(utf8.decoder)
+            .join()
+            .timeout(const Duration(seconds: 10));
+
         if (res.statusCode < 200 || res.statusCode >= 300) {
           throw HttpException('HTTP ${res.statusCode}', uri: uri);
         }
 
-        final raw = await res.transform(utf8.decoder).join();
-        final decoded = jsonDecode(raw) as Map<String, dynamic>;
-        final parsed = _parseResponse(decoded);
-
-        if (_memoryCache.length > 24) {
-          _memoryCache.remove(_memoryCache.keys.first);
+        final dynamic decodedAny = jsonDecode(raw);
+        if (decodedAny is! Map<String, dynamic>) {
+          throw const FormatException('Некорректный формат ответа');
         }
-        _memoryCache[cacheKey] = parsed;
+        if (decodedAny['elements'] is! List) {
+          final remark = decodedAny['remark']?.toString() ?? '';
+          throw FormatException(
+            remark.isNotEmpty ? remark : 'Нет списка элементов',
+          );
+        }
+
+        final parsed = _parseResponse(decodedAny);
+        _putMemoryCache(cacheKey, parsed);
+        await _saveToDiskCache(cacheKey, parsed);
         return parsed;
       } catch (err) {
         lastErr = err;
@@ -131,10 +233,65 @@ class WaterwayService {
       }
     }
 
+    if (diskEntry != null) {
+      _putMemoryCache(cacheKey, diskEntry.data);
+      return diskEntry.data;
+    }
+
     if (lastErr != null) {
       throw lastErr;
     }
     return WaterwayOverlayData.empty;
+  }
+
+  void _putMemoryCache(String key, WaterwayOverlayData data) {
+    if (_memoryCache.length >= 24) {
+      _memoryCache.remove(_memoryCache.keys.first);
+    }
+    _memoryCache[key] = data;
+  }
+
+  Future<({WaterwayOverlayData data, bool isExpired})?> _loadFromDiskCache(
+    String key,
+  ) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('$_diskCachePrefix$key');
+      if (raw == null || raw.isEmpty) return null;
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      final savedMs = (decoded['saved_at_ms'] as num?)?.toInt() ?? 0;
+      final age = DateTime.now().millisecondsSinceEpoch - savedMs;
+      final data = WaterwayOverlayData.fromJson(
+        Map<String, dynamic>.from(decoded['data'] as Map),
+        fromCache: true,
+      );
+      return (data: data, isExpired: age > _diskCacheTtl.inMilliseconds);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _saveToDiskCache(String key, WaterwayOverlayData data) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final keys = List<String>.from(
+        prefs.getStringList(_diskKeysIndexKey) ?? const [],
+      );
+      keys.remove(key);
+      keys.add(key);
+      while (keys.length > 16) {
+        final oldest = keys.removeAt(0);
+        await prefs.remove('$_diskCachePrefix$oldest');
+      }
+      await prefs.setStringList(_diskKeysIndexKey, keys);
+      await prefs.setString(
+        '$_diskCachePrefix$key',
+        jsonEncode({
+          'saved_at_ms': DateTime.now().millisecondsSinceEpoch,
+          'data': data.toJson(),
+        }),
+      );
+    } catch (_) {}
   }
 
   WaterwayOverlayData _parseResponse(Map<String, dynamic> json) {
