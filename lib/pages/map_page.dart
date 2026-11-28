@@ -9,6 +9,7 @@ import 'package:latlong2/latlong.dart';
 import '../models/boat_track.dart';
 import '../models/fishing_spot.dart';
 import '../services/api_service.dart';
+import '../services/gpx_service.dart';
 import '../services/location_service.dart';
 import '../services/offline_map_service.dart';
 import '../services/track_service.dart';
@@ -42,6 +43,7 @@ class _MapPageState extends State<MapPage> {
   final ApiService _apiService = ApiService();
   final LocationService _locationService = LocationService();
   final TrackService _trackService = TrackService();
+  final GpxService _gpxService = GpxService();
   final OfflineMapService _offlineService = OfflineMapService();
   final WeatherService _weatherService = WeatherService();
   final WaterwayService _waterwayService = WaterwayService();
@@ -233,6 +235,30 @@ class _MapPageState extends State<MapPage> {
     }
   }
 
+  void _selectAndFitTrack(BoatTrack? track) {
+    setState(() => _loadedTrack = track);
+    if (track != null && track.points.length >= 2 && _isMapReady) {
+      _mapController.fitCamera(
+        CameraFit.bounds(
+          bounds: LatLngBounds.fromPoints(track.points),
+          padding: const EdgeInsets.all(48),
+        ),
+      );
+    }
+  }
+
+  void _openGpxExchangeSheet() {
+    showGpxExchangeSheet(
+      context: context,
+      gpxService: _gpxService,
+      trackService: _trackService,
+      apiService: _apiService,
+      currentSpots: _spots,
+      onSelectTrack: _selectAndFitTrack,
+      onSpotsChanged: _loadSpots,
+    );
+  }
+
   Future<void> _refreshWaterways() async {
     if (!_settings.showSeamarks || !_isMapReady) return;
     if (_currentZoom < 9.0) {
@@ -402,15 +428,7 @@ class _MapPageState extends State<MapPage> {
       ),
     );
     if (selectedTrack != null && mounted) {
-      setState(() => _loadedTrack = selectedTrack);
-      if (selectedTrack.points.length >= 2 && _isMapReady) {
-        _mapController.fitCamera(
-          CameraFit.bounds(
-            bounds: LatLngBounds.fromPoints(selectedTrack.points),
-            padding: const EdgeInsets.all(48),
-          ),
-        );
-      }
+      _selectAndFitTrack(selectedTrack);
     }
   }
 
@@ -1020,7 +1038,7 @@ class _MapPageState extends State<MapPage> {
             },
           ),
           IconButton(
-            tooltip: 'Сохранённые треки',
+            tooltip: 'Сохранённые треки и GPX',
             icon: Icon(
               Icons.timeline,
               color: _loadedTrack != null
@@ -1030,18 +1048,10 @@ class _MapPageState extends State<MapPage> {
             onPressed: () => showSavedTracksSheet(
               context: context,
               trackService: _trackService,
+              gpxService: _gpxService,
               activeLoadedTrack: _loadedTrack,
-              onSelectTrack: (track) {
-                setState(() => _loadedTrack = track);
-                if (track != null && track.points.length >= 2 && _isMapReady) {
-                  _mapController.fitCamera(
-                    CameraFit.bounds(
-                      bounds: LatLngBounds.fromPoints(track.points),
-                      padding: const EdgeInsets.all(48),
-                    ),
-                  );
-                }
-              },
+              onSelectTrack: _selectAndFitTrack,
+              onOpenGpxSheet: _openGpxExchangeSheet,
             ),
           ),
           IconButton(
@@ -1060,7 +1070,7 @@ class _MapPageState extends State<MapPage> {
             ),
           ),
           IconButton(
-            tooltip: 'Слои и фильтры',
+            tooltip: 'Слои, фильтры и GPX',
             icon: Badge(
               isLabelVisible: _settings.showSeamarks ||
                   _settings.onlyMySpots ||
@@ -1071,6 +1081,7 @@ class _MapPageState extends State<MapPage> {
               context: context,
               current: _settings,
               onChanged: _updateSettings,
+              onOpenGpx: _openGpxExchangeSheet,
             ),
           ),
           IconButton(
